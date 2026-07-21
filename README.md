@@ -1,0 +1,153 @@
+# Koreb Homes — Backend API
+
+Backend for **Koreb Homes**, a premium real estate listing platform for Ethiopia
+(web + Android + iOS, all sharing this one API).
+
+Built with **NestJS + TypeScript**, **PostgreSQL + Prisma** (PostGIS for
+map/location search), payments via **Chapa** behind a swappable provider
+interface, and phone + SMS OTP authentication with JWT access/refresh tokens.
+
+---
+
+## What's in this scaffold
+
+| Area | Status |
+|---|---|
+| Auth — phone + SMS OTP, JWT access/refresh with rotation | ✅ |
+| Users — profile CRUD, agent verification submission | ✅ |
+| Listings — create, search/filter/sort/paginate, detail, dashboard, status lifecycle | ✅ |
+| Photos — upload with compression + thumbnails, reorder, delete | ✅ |
+| Favorites — idempotent add/remove/list | ✅ |
+| Payments — Chapa integration + server-side-verified webhook | ✅ |
+| Reports — "report this listing" | ✅ |
+| Admin — review queue, user management, agent verification, dashboard stats, pricing controls (RBAC-locked to ADMIN) | ✅ |
+| Jobs — listing inactivity nudge + auto-unpublish | ✅ |
+| Fayda (eSignet) national-ID verification | ⏳ Placeholders reserved in `.env.example`; module not yet built |
+
+---
+
+## Prerequisites
+
+- **Node.js** 20+ and npm
+- **PostgreSQL** 14+ with the **PostGIS** extension available
+- A **Chapa** account (test keys are fine for development)
+
+---
+
+## Getting started
+
+```bash
+# 1. Install dependencies
+npm install
+
+# 2. Create your environment file and fill in values
+cp .env.example .env
+#    -> set DATABASE_URL, JWT secrets, Chapa keys, etc.
+
+# 3. Enable PostGIS on your database once (psql):
+#    CREATE EXTENSION IF NOT EXISTS postgis;
+
+# 4. Generate the Prisma client + run the first migration
+npm run prisma:generate
+npm run prisma:migrate      # creates tables from prisma/schema.prisma
+
+# 5. (Optional) seed demo data — admin/agent/owner/buyer + sample listings
+npm run prisma:seed
+
+# 6. Start the API in watch mode
+npm run start:dev
+```
+
+The API listens on `http://localhost:3000` by default, under the prefix
+`/api/v1` (both configurable in `.env`).
+
+> **Note on Prisma + offline environments:** `prisma generate` downloads a
+> small engine binary the first time. If you're behind a restrictive network,
+> ensure `binaries.prisma.sh` is reachable, or consult the Prisma docs on
+> offline installs.
+
+---
+
+## Project structure
+
+```
+koreb-backend/
+├─ prisma/
+│  ├─ schema.prisma        # all tables + enums (source of truth for the DB)
+│  └─ seed.ts              # demo data + default platform settings
+├─ src/
+│  ├─ main.ts              # bootstrap (CORS, helmet, validation, raw body for webhooks)
+│  ├─ app.module.ts        # wires in every feature module (incl. AdminModule)
+│  ├─ common/              # shared decorators, guards, filters, provider interfaces
+│  │  ├─ decorators/       # @Roles, @CurrentUser
+│  │  ├─ guards/           # JwtAuthGuard, JwtRefreshGuard, RolesGuard
+│  │  ├─ filters/          # global HTTP exception filter
+│  │  └─ interfaces/       # SmsProvider + PaymentProvider (swappable contracts)
+│  ├─ prisma/              # PrismaModule + PrismaService
+│  ├─ auth/                # OTP + JWT; console SMS provider stub
+│  ├─ users/               # profile + agent verification submission
+│  ├─ listings/            # core listings: create/search/detail/dashboard
+│  ├─ photos/              # upload + sharp compression
+│  ├─ favorites/
+│  ├─ payments/            # Chapa provider + webhook
+│  ├─ reports/
+│  ├─ admin/               # admin panel backend (ADMIN-only)
+│  └─ jobs/                # scheduled inactivity/auto-unpublish job
+├─ .env.example
+├─ package.json
+└─ tsconfig.json
+```
+
+---
+
+## Key design decisions
+
+- **Swappable providers.** SMS delivery and payments both sit behind interfaces
+  (`SmsProvider`, `PaymentProvider`). Today they're `ConsoleSmsProvider` (logs
+  codes for local dev) and `ChapaProvider`. Swapping either for a different
+  vendor is a one-line change in the relevant module — no other code changes.
+
+- **Payments are verified server-side.** The Chapa webhook is never trusted on
+  its own: the signature is checked *and* the transaction is independently
+  re-verified with Chapa before any listing is marked paid. Settling is
+  idempotent, so duplicate webhooks are safe.
+
+- **Listing status lifecycle:**
+  `DRAFT → AWAITING_PAYMENT → AWAITING_REVIEW → LIVE`, with `REJECTED`,
+  `UNPUBLISHED` (inactivity), and `ARCHIVED` as side states. Editing a *live*
+  listing sends it back through review to prevent bait-and-switch.
+
+- **Admin-editable pricing.** Listing fees and the penalty multiplier live in
+  the `PlatformSetting` table and are editable from the Admin Panel — no code
+  deploy needed to change pricing.
+
+- **Inactivity handling.** Stale live listings are *unpublished, never deleted*,
+  after a nudge + grace period, so owners can renew them back to live. Admin can
+  override at any stage.
+
+---
+
+## API surface (high level)
+
+All routes are under `/api/v1`.
+
+**Auth** — `POST /auth/otp/request`, `POST /auth/otp/verify`, `POST /auth/refresh`, `POST /auth/logout`
+**Users** — `GET/PATCH /users/me`, `POST /users/me/verification`, `GET /users/:id/public`
+**Listings** — `GET /listings` (search), `GET /listings/:id`, `POST /listings`, `GET /listings/mine/dashboard`, `PATCH/DELETE /listings/:id`, `POST /listings/:id/submit-for-payment`, `POST /listings/:id/renew`
+**Photos** — `POST/DELETE /listings/:listingId/photos`, `POST /listings/:listingId/photos/reorder`
+**Favorites** — `GET /favorites`, `POST/DELETE /favorites/:listingId`
+**Payments** — `POST /payments/listing/initiate`, `POST /payments/webhook`, `POST /payments/verify`, `GET /payments/mine`
+**Reports** — `POST /listings/:listingId/report`
+**Admin** (ADMIN role only) — `GET /admin/dashboard`, `GET /admin/listings/review-queue`, `POST /admin/listings/:id/approve|reject`, `GET /admin/users`, `POST /admin/users/:id/suspend|unsuspend`, `GET /admin/verification/queue`, `POST /admin/verification/:userId/approve|reject`, `GET /admin/reports`, `GET/PATCH /admin/settings`
+
+---
+
+## Next steps (backend)
+
+- Build the **Fayda (eSignet / OpenID Connect)** module for national-ID
+  verification (env placeholders already reserved).
+- Add an **S3-compatible storage driver** for photos before production
+  (currently `local` disk for dev).
+- Wire the inactivity job's nudge hook to a real **SMS/push notification**
+  channel.
+- Add automated tests.

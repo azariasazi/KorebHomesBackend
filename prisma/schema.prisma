@@ -1,0 +1,280 @@
+// ---------------------------------------------------------------------------
+// Koreb Homes — Prisma Schema
+// PostgreSQL + PostGIS (for map/location search on Listing.lat/lng)
+// ---------------------------------------------------------------------------
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [postgis]
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum UserRole {
+  BUYER_RENTER
+  OWNER
+  AGENT
+  ADMIN
+}
+
+enum VerificationStatus {
+  NOT_SUBMITTED
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum PropertyType {
+  HOUSE
+  APARTMENT
+  LAND
+  COMMERCIAL
+}
+
+enum ListingType {
+  SALE
+  RENT
+}
+
+enum ListingStatus {
+  DRAFT
+  AWAITING_PAYMENT
+  AWAITING_REVIEW
+  LIVE
+  REJECTED
+  UNPUBLISHED
+  ARCHIVED
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  REFUNDED
+}
+
+enum PaymentPurpose {
+  LISTING_FEE
+  AGENT_SUBSCRIPTION
+  FEATURED_LISTING
+}
+
+enum ReportStatus {
+  OPEN
+  REVIEWED
+  DISMISSED
+}
+
+// ---------------------------------------------------------------------------
+// Users & Auth
+// ---------------------------------------------------------------------------
+
+model User {
+  id                  String              @id @default(uuid())
+  phone               String              @unique
+  name                String?
+  profilePhotoUrl     String?
+  city                String?
+  role                UserRole            @default(BUYER_RENTER)
+  isSuspended         Boolean             @default(false)
+  suspendedReason     String?
+
+  // Agent-specific verification
+  verificationStatus  VerificationStatus  @default(NOT_SUBMITTED)
+  verificationDocUrl  String?
+  agencyName          String?
+  verificationNote    String?
+  verifiedAt          DateTime?
+  verifiedByAdminId   String?
+
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+
+  listings            Listing[]
+  favorites           Favorite[]
+  payments            Payment[]
+  reportsFiled        Report[]            @relation("ReportsFiled")
+  otpCodes            OtpCode[]
+  refreshTokens       RefreshToken[]
+
+  @@index([role])
+  @@index([verificationStatus])
+}
+
+model OtpCode {
+  id          String   @id @default(uuid())
+  userId      String?
+  phone       String
+  codeHash    String
+  attempts    Int      @default(0)
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  createdAt   DateTime @default(now())
+
+  user        User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([phone])
+}
+
+model RefreshToken {
+  id          String    @id @default(uuid())
+  userId      String
+  tokenHash   String
+  revokedAt   DateTime?
+  replacedBy  String?
+  expiresAt   DateTime
+  createdAt   DateTime  @default(now())
+
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Listings
+// ---------------------------------------------------------------------------
+
+model Listing {
+  id                String        @id @default(uuid())
+  ownerId           String
+  propertyType      PropertyType
+  listingType       ListingType
+  priceEtb          Decimal       @db.Decimal(14, 2)
+
+  region            String
+  city              String
+  subCity           String?
+  areaName          String?
+  latitude          Float?
+  longitude         Float?
+
+  bedrooms          Int?
+  bathrooms         Int?
+  sizeSqm           Float?
+  floor             String?
+  furnished         Boolean       @default(false)
+  amenities         String[]      @default([])
+
+  descriptionEn     String?
+  descriptionAm     String?
+
+  status            ListingStatus @default(DRAFT)
+  rejectionReason   String?
+  viewCount         Int           @default(0)
+
+  isFeatured        Boolean       @default(false)
+  featuredUntil     DateTime?
+
+  publishedAt       DateTime?
+  lastRenewedAt     DateTime?
+  inactivityNudgeSentAt DateTime?
+  penaltyMultiplierApplied Float? 
+
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  owner             User          @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  photos            Photo[]
+  favorites         Favorite[]
+  payments          Payment[]
+  reports           Report[]
+
+  @@index([status])
+  @@index([listingType, propertyType])
+  @@index([city, subCity])
+  @@index([ownerId])
+}
+
+model Photo {
+  id          String   @id @default(uuid())
+  listingId   String
+  url         String
+  thumbUrl    String?
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  listing     Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@index([listingId])
+}
+
+model Favorite {
+  id          String   @id @default(uuid())
+  userId      String
+  listingId   String
+  createdAt   DateTime @default(now())
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listing     Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, listingId])
+  @@index([listingId])
+}
+
+// ---------------------------------------------------------------------------
+// Payments
+// ---------------------------------------------------------------------------
+
+model Payment {
+  id                String         @id @default(uuid())
+  userId            String
+  listingId         String?
+  purpose           PaymentPurpose @default(LISTING_FEE)
+  amountEtb         Decimal        @db.Decimal(14, 2)
+  status            PaymentStatus  @default(PENDING)
+
+  provider          String         @default("chapa")
+  providerRef       String?        @unique  // tx_ref sent to Chapa
+  providerChargeId  String?                  // id returned by Chapa on verify
+  rawWebhookPayload Json?
+
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  user              User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listing           Listing?       @relation(fields: [listingId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Reports (flagging suspicious/fake listings)
+// ---------------------------------------------------------------------------
+
+model Report {
+  id            String       @id @default(uuid())
+  listingId     String
+  reportedById  String?
+  reason        String
+  details       String?
+  status        ReportStatus @default(OPEN)
+  resolvedNote  String?
+
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  listing       Listing      @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  reportedBy    User?        @relation("ReportsFiled", fields: [reportedById], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([listingId])
+}
+
+// ---------------------------------------------------------------------------
+// Platform Settings (Admin-configurable, no code changes required)
+// ---------------------------------------------------------------------------
+
+model PlatformSetting {
+  key         String   @id
+  value       String
+  description String?
+  updatedAt   DateTime @updatedAt
+}
