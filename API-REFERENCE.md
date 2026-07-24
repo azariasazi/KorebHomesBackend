@@ -266,9 +266,37 @@ listing that is currently `LIVE` sends it **back to `AWAITING_REVIEW`**.
 ### `DELETE /listings/:id` 🔒
 Remove own listing. Returns `{ "message": "Listing removed." }`.
 
-### `POST /listings/:id/submit-for-payment` 🔒
-Moves a `DRAFT` (or `REJECTED`) listing to `AWAITING_PAYMENT` — the step before
-initiating the listing-fee payment.
+### `POST /listings/:id/submit` 🔒
+Submits a `DRAFT` (or `REJECTED`) listing for publication.
+
+**Where it goes next depends on whether listing fees are switched on:**
+
+```json
+// Response when fees are OFF (current free launch period)
+{ "...listing fields": "...", "status": "AWAITING_REVIEW", "requiresPayment": false }
+
+// Response when fees are ON
+{ "...listing fields": "...", "status": "AWAITING_PAYMENT", "requiresPayment": true }
+```
+
+**Frontend: branch on `requiresPayment`.**
+- `false` → go straight to a "Submitted — pending review" confirmation screen.
+- `true` → call `POST /payments/listing/initiate` and send the user to checkout.
+
+Build both paths now even though fees are currently off, so nothing needs
+rewriting when the toggle flips.
+
+> ### Listing fees are currently DISABLED
+> Koreb is free for its first 6–12 months. The `LISTING_FEE_ENABLED` platform
+> setting is `false`, so listings skip payment entirely. Calling
+> `POST /payments/listing/initiate` while fees are off returns a `400`.
+>
+> **Admin review is mandatory regardless** — every listing is reviewed by an
+> admin before going live, in both the free and paid periods. The toggle only
+> controls whether money changes hands.
+>
+> An admin flips it via `PATCH /admin/settings/LISTING_FEE_ENABLED` with
+> `{ "value": "true" }`. No code change or redeploy needed.
 
 ### `POST /listings/:id/renew` 🔒
 Resets the inactivity clock on a live/unpublished listing (back to `LIVE`).
@@ -392,7 +420,7 @@ Remove from favorites. Idempotent.
 Listing fees are paid via **Chapa** (which covers Telebirr, CBE Birr, HelloCash,
 and card). The flow:
 
-1. Listing is in `AWAITING_PAYMENT` (after `submit-for-payment`).
+1. Listing is in `AWAITING_PAYMENT` (after `submit`, when fees are enabled).
 2. Frontend calls `POST /payments/listing/initiate` → gets a `checkoutUrl`.
 3. Frontend **redirects the user to `checkoutUrl`** (Chapa-hosted checkout).
 4. After payment, Chapa notifies the backend (webhook) which verifies it
@@ -484,7 +512,7 @@ returns a `400`.
 | **Sign Up** | `POST /auth/otp/request`, `POST /auth/otp/verify` |
 | **Home Feed** | `GET /listings` (+ query params for filters/sort/map) |
 | **Listing Detail** | `GET /listings/:id`, `POST /favorites/:id`, `POST /listings/:id/report` |
-| **Post a Listing** | `POST /listings`, `POST /listings/:id/photos`, `POST /listings/:id/submit-for-payment`, `POST /payments/listing/initiate` — now includes building name / unit number / floor number fields |
+| **Post a Listing** | `POST /listings`, `POST /listings/:id/photos`, `POST /listings/:id/submit`, `POST /payments/listing/initiate` — now includes building name / unit number / floor number fields |
 | **Owner/Agent Dashboard** | `GET /listings/mine/dashboard`, `PATCH`/`DELETE /listings/:id`, `POST /listings/:id/renew` — rejected listings now show `rejectionCode` + `rejectionReason`, so build a "fix and resubmit" path |
 | **Search Filters** | `GET /listings` with filter params |
 | **Favorites** | `GET /favorites`, `DELETE /favorites/:id` |

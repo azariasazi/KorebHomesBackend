@@ -19,6 +19,14 @@ export class PaymentsService {
   // Initiate a listing-fee payment -> returns a checkout URL for the client
   // ---------------------------------------------------------------------
   async initiateListingPayment(userId: string, listingId: string) {
+    // Hard stop: if the platform is in its free period, no payment can be
+    // initiated at all. Guards against a stale frontend build (or a crafted
+    // request) charging someone during a period when listings are free.
+    const feeEnabled = await this.listingsService.isListingFeeEnabled();
+    if (!feeEnabled) {
+      throw new BadRequestException('Listing fees are currently disabled — no payment is required.');
+    }
+
     const listing = await this.prisma.listing.findUnique({ where: { id: listingId } });
     if (!listing) throw new NotFoundException('Listing not found.');
     if (listing.ownerId !== userId) throw new ForbiddenException('You do not own this listing.');

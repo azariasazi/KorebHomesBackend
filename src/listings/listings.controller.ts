@@ -60,11 +60,16 @@ export class ListingsController {
     return this.listingsService.remove(id, userId);
   }
 
+  /**
+   * Submit a listing for publication. Returns the listing plus a
+   * `requiresPayment` flag telling the frontend whether to send the user to
+   * checkout next, or straight to a "pending review" confirmation.
+   */
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.OWNER, UserRole.AGENT)
-  @Post(':id/submit-for-payment')
-  markReadyForPayment(@Param('id') id: string, @CurrentUser('id') userId: string) {
-    return this.listingsService.markReadyForPayment(id, userId);
+  @Post(':id/submit')
+  submitForReview(@Param('id') id: string, @CurrentUser('id') userId: string) {
+    return this.listingsService.submitForReview(id, userId);
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)

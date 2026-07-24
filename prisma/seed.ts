@@ -17,6 +17,16 @@ const prisma = new PrismaClient();
 async function main() {
   console.log('Seeding platform settings...');
   await prisma.platformSetting.upsert({
+    where: { key: 'LISTING_FEE_ENABLED' },
+    update: {},
+    create: {
+      key: 'LISTING_FEE_ENABLED',
+      value: 'false',
+      description:
+        'Master switch for listing fees. "false" = listings are free and skip the payment step (admin review still applies). Set to "true" when the free launch period ends.',
+    },
+  });
+  await prisma.platformSetting.upsert({
     where: { key: 'OWNER_LISTING_FEE_ETB' },
     update: {},
     create: {

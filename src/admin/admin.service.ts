@@ -216,6 +216,29 @@ export class AdminService {
   async updateSetting(key: string, value: string) {
     const existing = await this.prisma.platformSetting.findUnique({ where: { key } });
     if (!existing) throw new NotFoundException(`Setting "${key}" not found.`);
-    return this.prisma.platformSetting.update({ where: { key }, data: { value } });
+
+    // Boolean settings must be exactly "true" or "false". Without this, an
+    // admin typing "yes" to switch fees on would silently leave them off,
+    // because the reader only treats "true" as enabled.
+    const BOOLEAN_KEYS = ['LISTING_FEE_ENABLED'];
+    if (BOOLEAN_KEYS.includes(key) && !['true', 'false'].includes(value.toLowerCase())) {
+      throw new BadRequestException(`Setting "${key}" must be either "true" or "false".`);
+    }
+
+    // Numeric settings must parse as a non-negative number.
+    const NUMERIC_KEYS = [
+      'OWNER_LISTING_FEE_ETB',
+      'AGENT_LISTING_FEE_ETB',
+      'PENALTY_MULTIPLIER',
+      'LISTING_INACTIVITY_DAYS',
+    ];
+    if (NUMERIC_KEYS.includes(key) && (isNaN(Number(value)) || Number(value) < 0)) {
+      throw new BadRequestException(`Setting "${key}" must be a non-negative number.`);
+    }
+
+    return this.prisma.platformSetting.update({
+      where: { key },
+      data: { value: BOOLEAN_KEYS.includes(key) ? value.toLowerCase() : value },
+    });
   }
 }

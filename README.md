@@ -63,6 +63,36 @@ The API listens on `http://localhost:3000` by default, under the prefix
 
 ---
 
+## Listing fees: currently OFF
+
+Koreb launches free for its first 6–12 months. This is controlled by the
+`LISTING_FEE_ENABLED` platform setting, which defaults to `false`.
+
+- **Fee OFF** — `POST /listings/:id/submit` sends the listing straight to
+  `AWAITING_REVIEW`. The payment step is skipped and `/payments/listing/initiate`
+  returns a `400`.
+- **Fee ON** — the same call routes to `AWAITING_PAYMENT` and the Chapa flow
+  runs as normal.
+
+**Admin review is mandatory in both cases.** The toggle decides whether money
+changes hands, never whether a human checks the listing.
+
+To switch fees on when the free period ends — no code change, no redeploy:
+
+```
+PATCH /api/v1/admin/settings/LISTING_FEE_ENABLED
+{ "value": "true" }
+```
+
+The setting reads as *disabled* unless the value is exactly `true`, so a missing
+row or a typo fails safe (free) rather than accidentally charging people.
+
+> **Upgrading an existing database:** the toggle lives in the `PlatformSetting`
+> table, so re-run `npm run prisma:seed` once to create the row. The seed uses
+> upsert and won't disturb your existing data.
+
+---
+
 ## Applying Change Request 01 (unit fields + structured rejections)
 
 If you already have a database from before this change, run these in order:
@@ -172,7 +202,7 @@ All routes are under `/api/v1`.
 
 **Auth** — `POST /auth/otp/request`, `POST /auth/otp/verify`, `POST /auth/refresh`, `POST /auth/logout`
 **Users** — `GET/PATCH /users/me`, `POST /users/me/verification`, `GET /users/:id/public`
-**Listings** — `GET /listings` (search), `GET /listings/:id`, `POST /listings`, `GET /listings/mine/dashboard`, `PATCH/DELETE /listings/:id`, `POST /listings/:id/submit-for-payment`, `POST /listings/:id/renew`
+**Listings** — `GET /listings` (search), `GET /listings/:id`, `POST /listings`, `GET /listings/mine/dashboard`, `PATCH/DELETE /listings/:id`, `POST /listings/:id/submit`, `POST /listings/:id/renew`
 **Photos** — `POST/DELETE /listings/:listingId/photos`, `POST /listings/:listingId/photos/reorder`
 **Favorites** — `GET /favorites`, `POST/DELETE /favorites/:listingId`
 **Payments** — `POST /payments/listing/initiate`, `POST /payments/webhook`, `POST /payments/verify`, `GET /payments/mine`

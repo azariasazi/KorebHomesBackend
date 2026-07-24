@@ -80,21 +80,48 @@ export class ListingsService {
     });
   }
 
-  async markReadyForPayment(listingId: string, userId: string) {
+  /**
+   * Owner/Agent submits a listing for publication.
+   *
+   * Where it goes next depends on the LISTING_FEE_ENABLED platform setting:
+   *   - fee ON  -> AWAITING_PAYMENT (frontend then calls payments/initiate)
+   *   - fee OFF -> AWAITING_REVIEW  (payment skipped entirely)
+   *
+   * Admin review is MANDATORY in both cases — the toggle only controls whether
+   * money changes hands, never whether a human checks the listing.
+   */
+  async submitForReview(listingId: string, userId: string) {
     const listing = await this.getOwnedListingOrThrow(listingId, userId);
     if (listing.status !== ListingStatus.DRAFT && listing.status !== ListingStatus.REJECTED) {
-      throw new ForbiddenException('Only draft or rejected listings can be submitted for payment.');
+      throw new ForbiddenException('Only draft or rejected listings can be submitted.');
     }
-    return this.prisma.listing.update({
+
+    const feeEnabled = await this.isListingFeeEnabled();
+
+    const updated = await this.prisma.listing.update({
       where: { id: listingId },
       data: {
-        status: ListingStatus.AWAITING_PAYMENT,
+        status: feeEnabled ? ListingStatus.AWAITING_PAYMENT : ListingStatus.AWAITING_REVIEW,
         // Clear the previous round's rejection detail on resubmission.
         rejectionCode: null,
         rejectionReason: null,
         rejectedAt: null,
       },
     });
+
+    return { ...updated, requiresPayment: feeEnabled };
+  }
+
+  /**
+   * Reads the admin-editable LISTING_FEE_ENABLED switch.
+   * Defaults to FALSE (free) if the setting row is missing, so a fresh or
+   * partially-seeded database can never accidentally start charging people.
+   */
+  async isListingFeeEnabled(): Promise<boolean> {
+    const setting = await this.prisma.platformSetting.findUnique({
+      where: { key: 'LISTING_FEE_ENABLED' },
+    });
+    return setting?.value?.toLowerCase() === 'true';
   }
 
   /** Called by PaymentsService once a listing-fee payment succeeds. */
