@@ -5,8 +5,51 @@ import { CreateListingDto } from './dto/create-listing.dto';
 import { UpdateListingDto } from './dto/update-listing.dto';
 import { SearchListingsDto, ListingSort } from './dto/search-listings.dto';
 
-const PUBLIC_LISTING_INCLUDE = {
-  photos: { orderBy: { sortOrder: 'asc' as const } },
+/**
+ * Explicit allow-list of fields returned by PUBLIC endpoints.
+ *
+ * This is deliberately a `select` (name every field that goes out) rather than
+ * an `include` or an omit-a-few approach. Prisma returns every scalar by
+ * default, so an omit-list would silently leak any field added to the model
+ * later. This fails CLOSED: a new field is invisible publicly until someone
+ * consciously adds it here.
+ *
+ * DO NOT ADD: unitNumber, rejectionCode, rejectionReason, rejectedAt.
+ * Those are private to the listing's owner and Admin. See the "Response
+ * shaping" section of backend-changes-listings-v1.md.
+ */
+const PUBLIC_LISTING_SELECT = {
+  id: true,
+  ownerId: true,
+  propertyType: true,
+  listingType: true,
+  priceEtb: true,
+  region: true,
+  city: true,
+  subCity: true,
+  areaName: true,
+  latitude: true,
+  longitude: true,
+  bedrooms: true,
+  bathrooms: true,
+  sizeSqm: true,
+  furnished: true,
+  amenities: true,
+  buildingName: true,
+  floorNumber: true,
+  floor: true, // legacy free-text; removed once the backfill to floorNumber is verified
+  descriptionEn: true,
+  descriptionAm: true,
+  status: true,
+  viewCount: true,
+  isFeatured: true,
+  publishedAt: true,
+  createdAt: true,
+  updatedAt: true,
+  photos: {
+    select: { id: true, url: true, thumbUrl: true, sortOrder: true },
+    orderBy: { sortOrder: 'asc' as const },
+  },
   owner: {
     select: {
       id: true,
@@ -44,7 +87,13 @@ export class ListingsService {
     }
     return this.prisma.listing.update({
       where: { id: listingId },
-      data: { status: ListingStatus.AWAITING_PAYMENT, rejectionReason: null },
+      data: {
+        status: ListingStatus.AWAITING_PAYMENT,
+        // Clear the previous round's rejection detail on resubmission.
+        rejectionCode: null,
+        rejectionReason: null,
+        rejectedAt: null,
+      },
     });
   }
 
@@ -103,7 +152,7 @@ export class ListingsService {
         orderBy,
         skip: (page - 1) * pageSize,
         take: pageSize,
-        include: PUBLIC_LISTING_INCLUDE,
+        select: PUBLIC_LISTING_SELECT,
       }),
       this.prisma.listing.count({ where }),
     ]);
@@ -123,7 +172,7 @@ export class ListingsService {
   async findOnePublic(id: string) {
     const listing = await this.prisma.listing.findUnique({
       where: { id },
-      include: PUBLIC_LISTING_INCLUDE,
+      select: PUBLIC_LISTING_SELECT,
     });
     if (!listing || listing.status !== ListingStatus.LIVE) {
       throw new NotFoundException('Listing not found.');

@@ -61,6 +61,45 @@ npm run start:dev
 The API listens on `http://localhost:3000` by default, under the prefix
 `/api/v1` (both configurable in `.env`).
 
+---
+
+## Applying Change Request 01 (unit fields + structured rejections)
+
+If you already have a database from before this change, run these in order:
+
+```bash
+# 1. Create and apply the migration for the new columns
+npx prisma migrate dev --name add_unit_fields_and_rejection_detail
+
+# 2. Backfill the old free-text `floor` into the new structured `floorNumber`
+npx ts-node prisma/backfill-floor-number.ts
+#    -> anything it can't parse is listed at the end for manual review
+
+# 3. Verify the privacy guarantee still holds
+npm test
+```
+
+The legacy `floor` column is intentionally **kept** for now so no data is lost.
+Once the backfill output is clean and you've spot-checked a few listings, the
+`floor` column can be dropped in a follow-up migration.
+
+> **Do not skip step 3.** The test suite asserts that `unitNumber` never appears
+> in a public API response. That's the single most damaging regression possible
+> in this change set — a unit number is a precise home address.
+
+---
+
+## Testing
+
+```bash
+npm test          # run once
+npm run test:watch
+```
+
+Current coverage is focused on the privacy guarantee around private listing
+fields (`src/listings/listings.service.spec.ts`). Broader coverage is a
+follow-on task.
+
 > **Note on Prisma + offline environments:** `prisma generate` downloads a
 > small engine binary the first time. If you're behind a restrictive network,
 > ensure `binaries.prisma.sh` is reachable, or consult the Prisma docs on

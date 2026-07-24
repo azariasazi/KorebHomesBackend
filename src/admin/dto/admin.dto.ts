@@ -1,11 +1,19 @@
-import { IsInt, IsOptional, IsString, MaxLength, Min, MinLength } from 'class-validator';
+import { IsEnum, IsInt, IsOptional, IsString, MaxLength, Min, MinLength } from 'class-validator';
 import { Type } from 'class-transformer';
+import { ListingRejectionCode } from '@prisma/client';
 
 export class RejectListingDto {
+  /** Required. One of the ListingRejectionCode values. */
+  @IsEnum(ListingRejectionCode, {
+    message: `code must be one of: ${Object.values(ListingRejectionCode).join(', ')}`,
+  })
+  code: ListingRejectionCode;
+
+  /** Optional free-text context from the admin, shown to the owner. */
+  @IsOptional()
   @IsString()
-  @MinLength(3)
   @MaxLength(500)
-  reason: string;
+  note?: string;
 }
 
 export class SuspendUserDto {

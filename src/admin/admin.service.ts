@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import {
+  ListingRejectionCode,
   ListingStatus,
   PaymentStatus,
   ReportStatus,
@@ -73,17 +74,26 @@ export class AdminService {
         status: ListingStatus.LIVE,
         publishedAt: listing.publishedAt ?? new Date(),
         lastRenewedAt: new Date(),
+        // Clear any rejection detail from a previous round so a stale reason
+        // doesn't linger on a now-live listing.
+        rejectionCode: null,
         rejectionReason: null,
+        rejectedAt: null,
       },
     });
   }
 
-  async rejectListing(listingId: string, reason: string) {
+  async rejectListing(listingId: string, code: ListingRejectionCode, note?: string) {
     const listing = await this.prisma.listing.findUnique({ where: { id: listingId } });
     if (!listing) throw new NotFoundException('Listing not found.');
     return this.prisma.listing.update({
       where: { id: listingId },
-      data: { status: ListingStatus.REJECTED, rejectionReason: reason },
+      data: {
+        status: ListingStatus.REJECTED,
+        rejectionCode: code,
+        rejectionReason: note ?? null,
+        rejectedAt: new Date(),
+      },
     });
   }
 

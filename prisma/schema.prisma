@@ -72,6 +72,17 @@ enum ReportStatus {
   DISMISSED
 }
 
+enum ListingRejectionCode {
+  DUPLICATE
+  SUSPECTED_FRAUD
+  POOR_PHOTOS
+  INCOMPLETE_DETAILS
+  PRICE_IMPLAUSIBLE
+  PROHIBITED_CONTENT
+  WRONG_CATEGORY
+  OTHER
+}
+
 // ---------------------------------------------------------------------------
 // Users & Auth
 // ---------------------------------------------------------------------------
@@ -158,16 +169,28 @@ model Listing {
   bedrooms          Int?
   bathrooms         Int?
   sizeSqm           Float?
-  floor             String?
   furnished         Boolean       @default(false)
   amenities         String[]      @default([])
+
+  // --- Building / unit identification ---
+  buildingName      String?   // PUBLIC.  e.g. "Zefmesh Grand", "Bole Rwanda Apartments"
+  unitNumber        String?   // PRIVATE. e.g. "4B". Required for APARTMENT. NEVER public.
+  floorNumber       Int?      // PUBLIC.  -1 = basement, 0 = ground, 1+ = upper floors.
+
+  // Legacy free-text floor. Kept temporarily so existing data can be backfilled
+  // into floorNumber; dropped in a follow-up migration once verified.
+  floor             String?
 
   descriptionEn     String?
   descriptionAm     String?
 
   status            ListingStatus @default(DRAFT)
-  rejectionReason   String?
   viewCount         Int           @default(0)
+
+  // --- Rejection detail (PRIVATE: owner + admin only) ---
+  rejectionCode     ListingRejectionCode?
+  rejectionReason   String?               // optional free-text note from the admin
+  rejectedAt        DateTime?
 
   isFeatured        Boolean       @default(false)
   featuredUntil     DateTime?
@@ -190,6 +213,8 @@ model Listing {
   @@index([listingType, propertyType])
   @@index([city, subCity])
   @@index([ownerId])
+  // Supports the duplicate-detection lookup (§7 of the change request).
+  @@index([city, buildingName, unitNumber])
 }
 
 model Photo {

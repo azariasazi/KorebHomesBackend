@@ -43,7 +43,7 @@ export class AdminController {
 
   @Post('listings/:id/reject')
   rejectListing(@Param('id') id: string, @Body() dto: RejectListingDto) {
-    return this.adminService.rejectListing(id, dto.reason);
+    return this.adminService.rejectListing(id, dto.code, dto.note);
   }
 
   // ---- User management ----
