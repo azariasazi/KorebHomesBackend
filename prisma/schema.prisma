@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // Koreb Homes — Prisma Schema
-// PostgreSQL + PostGIS (for map/location search on Listing.lat/lng)
+// PostgreSQL + Prisma. (PostGIS not required yet — see the note below.)
 // ---------------------------------------------------------------------------
 
 generator client {
@@ -8,10 +8,15 @@ generator client {
 }
 
 datasource db {
-  provider   = "postgresql"
-  url        = env("DATABASE_URL")
-  extensions = [postgis]
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
+
+// Note on PostGIS: map search currently uses a simple lat/lng bounding box on
+// plain Float columns, which needs no extension. If we later add true radius
+// search ("within 3km of here"), enable PostGIS then — install it on the
+// server, add `previewFeatures = ["postgresqlExtensions"]` to the generator
+// above, and re-add `extensions = [postgis]` here.
 
 // ---------------------------------------------------------------------------
 // Enums

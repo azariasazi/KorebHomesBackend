@@ -3,7 +3,7 @@
 Backend for **Koreb Homes**, a premium real estate listing platform for Ethiopia
 (web + Android + iOS, all sharing this one API).
 
-Built with **NestJS + TypeScript**, **PostgreSQL + Prisma** (PostGIS for
+Built with **NestJS + TypeScript**, **PostgreSQL + Prisma** (with room to add PostGIS for
 map/location search), payments via **Chapa** behind a swappable provider
 interface, and phone + SMS OTP authentication with JWT access/refresh tokens.
 
@@ -29,7 +29,7 @@ interface, and phone + SMS OTP authentication with JWT access/refresh tokens.
 ## Prerequisites
 
 - **Node.js** 20+ and npm
-- **PostgreSQL** 14+ with the **PostGIS** extension available
+- **PostgreSQL** 14+ (PostGIS is not required yet — see the note in `prisma/schema.prisma`)
 - A **Chapa** account (test keys are fine for development)
 
 ---
@@ -44,17 +44,14 @@ npm install
 cp .env.example .env
 #    -> set DATABASE_URL, JWT secrets, Chapa keys, etc.
 
-# 3. Enable PostGIS on your database once (psql):
-#    CREATE EXTENSION IF NOT EXISTS postgis;
-
-# 4. Generate the Prisma client + run the first migration
+# 3. Generate the Prisma client + run the first migration
 npm run prisma:generate
 npm run prisma:migrate      # creates tables from prisma/schema.prisma
 
-# 5. (Optional) seed demo data — admin/agent/owner/buyer + sample listings
+# 4. (Optional) seed demo data — admin/agent/owner/buyer + sample listings
 npm run prisma:seed
 
-# 6. Start the API in watch mode
+# 5. Start the API in watch mode
 npm run start:dev
 ```
 
