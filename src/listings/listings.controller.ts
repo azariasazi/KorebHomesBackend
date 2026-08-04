@@ -78,4 +78,24 @@ export class ListingsController {
   renew(@Param('id') id: string, @CurrentUser('id') userId: string) {
     return this.listingsService.renew(id, userId);
   }
+
+  /**
+   * Mark a live listing as sold or rented. The resulting status (SOLD vs
+   * RENTED) is derived from the listing's own type, so there's no body — the
+   * frontend can't send a mismatched status.
+   */
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.OWNER, UserRole.AGENT)
+  @Post(':id/mark-sold-rented')
+  markSoldOrRented(@Param('id') id: string, @CurrentUser('id') userId: string) {
+    return this.listingsService.markSoldOrRented(id, userId);
+  }
+
+  /** Reverse a sold/rented mark — returns the listing to LIVE. */
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.OWNER, UserRole.AGENT)
+  @Post(':id/mark-available')
+  markAvailableAgain(@Param('id') id: string, @CurrentUser('id') userId: string) {
+    return this.listingsService.markAvailableAgain(id, userId);
+  }
 }

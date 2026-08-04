@@ -36,7 +36,12 @@ NestJS controllers in the `koreb-backend` codebase.
 
 ## Authentication flow (how login actually works)
 
-Koreb uses **phone number + SMS OTP** — there are no passwords.
+Koreb uses **phone number + SMS OTP** as its primary login — there are no
+passwords. **"Continue with Google"** is an optional fast path (see
+`POST /auth/google`): it signs a user in, but because listings expose a contact
+phone and Fayda ID verification is phone-anchored, a phone is still required
+before a user can post. A Google-first user is signed in immediately with
+`needsPhone: true`, then attaches a phone via the same OTP flow below.
 
 1. User enters their phone number → frontend calls `POST /auth/otp/request`.
 2. User receives an SMS code → frontend calls `POST /auth/otp/verify` with the
@@ -74,7 +79,12 @@ Request an SMS verification code. *(Rate-limited: ~3/min.)*
 ---
 
 ### `POST /auth/otp/verify`
-Verify the code. Creates the account on first use, logs in thereafter.
+Verify the code. Behaviour depends on whether the request carries an access token:
+- **No token (normal signup/login):** creates the account on first use, logs in thereafter.
+- **With a valid `Authorization: Bearer` token (attach phone):** attaches the
+  verified phone to the *currently authenticated* account. This is how a
+  Google-first user (who has no phone yet) ends up with ONE account holding both
+  their Google identity and their phone — not a second account.
 
 **Body**
 ```json
@@ -93,6 +103,43 @@ Verify the code. Creates the account on first use, logs in thereafter.
   "user": { "id": "uuid", "phone": "+251912345678", "role": "OWNER" }
 }
 ```
+Attaching a phone already linked to a different account returns `400`.
+
+---
+
+### `POST /auth/google`
+"Continue with Google." The frontend runs the Google SDK, obtains a Google **ID
+token**, and posts it here. The backend verifies it server-side, then finds,
+creates, or links the Koreb account and returns **our own** session tokens (same
+shape as OTP verify) plus a `needsPhone` flag.
+
+**Body**
+```json
+{ "idToken": "<google-id-token-from-frontend-sdk>" }
+```
+**Response `201`**
+```json
+{
+  "accessToken": "eyJhbGci...",
+  "refreshToken": "eyJhbGci...",
+  "needsPhone": true,
+  "user": { "id": "uuid", "phone": null, "role": "BUYER_RENTER" }
+}
+```
+
+**How the account is resolved:**
+1. Known `googleId` → sign in.
+2. Else a **verified** Google email matching an existing account → link Google to
+   it and sign in. (Unverified emails never link — prevents account hijacking.)
+3. Else create a new account with `phone: null`, `role: BUYER_RENTER`.
+
+**`needsPhone`** is `true` whenever the account has no phone. When true, the
+frontend must run the phone+OTP attach step (call `POST /auth/otp/verify` **with
+the access token** from this response) before the user can post a listing.
+Browsing and favoriting work without a phone; **posting requires one.**
+
+> Phone + OTP remains the primary identity. Google is a convenience layer — it
+> gets a user in, but a phone still completes the account.
 
 ---
 
@@ -129,18 +176,42 @@ Returns the current user's profile.
 {
   "id": "uuid",
   "phone": "+251912345678",
+  "email": null,
   "name": "Dawit Alemu",
   "profilePhotoUrl": null,
   "city": "Addis Ababa",
   "role": "OWNER",
   "verificationStatus": "NOT_SUBMITTED",
   "agencyName": null,
+  "publicContactPhone": null,
+  "effectiveContactPhone": "+251912345678",
+  "hasGoogleLinked": false,
+  "needsPhone": false,
   "createdAt": "2026-07-21T09:00:00.000Z"
 }
 ```
+- `phone` — the login number (private, only ever returned to the user themselves here). `null` for a Google-first user who hasn't attached one yet.
+- `email` — from Google sign-in, if any.
+- `hasGoogleLinked` — whether a Google account is linked.
+- `needsPhone` — `true` when `phone` is null; the user must attach a phone (via OTP) before posting a listing.
+- `publicContactPhone` — the number the user chose to show publicly, or `null` if unset.
+- `effectiveContactPhone` — what actually appears on their listings right now:
+  their public number if set, otherwise their account phone. Useful for showing
+  the user "this is the number buyers currently see."
 
 ### `PATCH /users/me` 🔒
-Update profile. **Body** (all optional): `name`, `city`, `profilePhotoUrl`.
+Update profile. **Body** (all optional): `name`, `city`, `profilePhotoUrl`,
+`publicContactPhone`.
+- `publicContactPhone` must be a valid phone number (e.g. `+251912345678`).
+- Send `publicContactPhone: ""` (empty string) to **clear** it and fall back to
+  the account phone.
+
+> **Frontend — the informed default.** New users have no `publicContactPhone`,
+> so their **account phone shows on their listings by default.** The profile
+> screen should make this visible — show the `effectiveContactPhone` with a note
+> like "This number is shown on your listings" and let them change it. That way
+> the default is informed, not a surprise. Agents typically set a business line
+> here; private owners can keep or change theirs.
 
 ### `POST /users/me/verification` 🔒
 Agent submits a verification document (moves them to `PENDING`). **AGENT role only.**
@@ -158,9 +229,14 @@ Public agent/owner card shown on a listing. No auth required.
   "profilePhotoUrl": null,
   "role": "AGENT",
   "agencyName": "Habesha Realty",
-  "isVerifiedAgent": true
+  "isVerifiedAgent": true,
+  "contactPhone": "+251911777888"
 }
 ```
+`contactPhone` is the number to build Call / WhatsApp links from — the user's
+public contact number if they set one, otherwise their account phone. May be
+`null` only if a user somehow has neither. **The login phone is never exposed as
+its own field.**
 
 > **`verificationStatus`** values: `NOT_SUBMITTED`, `PENDING`, `APPROVED`, `REJECTED`.
 
@@ -236,7 +312,7 @@ Only `propertyType`, `listingType`, `priceEtb`, `region`, `city` are required �
 |---|---|---|---|
 | `buildingName` | string | **Public** | Optional for all types. Strongly encourage it in the UI for apartments — most named developments have one and it's useful for search. Max 120 chars. |
 | `unitNumber` | string | **Private** | **Required for `APARTMENT`**, optional otherwise. Max 20 chars, trimmed. Never appears in any public response — see the privacy note below. |
-| `floorNumber` | int | **Public** | `-1` = basement, `0` = ground, `1`+ = upper floors. Accepts -1 to 100. Replaces the old free-text `floor`. |
+| `floorNumber` | int | **Public** | `-1` = basement, `0` = ground, `1`+ = upper floors. Accepts **-5 to 200**. Replaces the old free-text `floor`. |
 
 > ### ⚠️ Privacy: `unitNumber` is captured but never published
 > An exact unit number is a precise home address. For a rental someone usually
@@ -301,6 +377,28 @@ rewriting when the toggle flips.
 ### `POST /listings/:id/renew` 🔒
 Resets the inactivity clock on a live/unpublished listing (back to `LIVE`).
 
+### `POST /listings/:id/mark-sold-rented` 🔒
+Marks a **LIVE** listing as sold or rented. No body — the resulting status is
+derived from the listing's own `listingType` (a `SALE` becomes `SOLD`, a `RENT`
+becomes `RENTED`), so the frontend can't send a mismatched status. Sets
+`soldRentedAt` to now. **OWNER or AGENT only.** Fails if the listing isn't LIVE.
+
+The listing **stays visible in search and detail** with its `SOLD`/`RENTED`
+status and `soldRentedAt` timestamp — render a badge and grey it out. Sold/rented
+listings are automatically sorted **below** available ones in search results.
+
+### `POST /listings/:id/mark-available` 🔒
+Reverses the above — returns a `SOLD`/`RENTED` listing to `LIVE` and clears
+`soldRentedAt` (e.g. a deal fell through, or it was tapped by mistake). Also
+resets the inactivity clock. Fails if the listing isn't currently sold/rented.
+
+### `PATCH /listings/:id` on a REJECTED listing — edit = resubmit 🔒
+Editing a `REJECTED` listing via `PATCH` **automatically re-queues it** to
+`AWAITING_REVIEW` and clears `rejectionCode` / `rejectionReason` / `rejectedAt`.
+The edit *is* the resubmission — no separate `submit` call is required (though
+calling `submit` afterwards is harmless). Same as editing a `LIVE` listing,
+which also returns to review to prevent bait-and-switch.
+
 ---
 
 ### Listing object shape
@@ -331,6 +429,7 @@ Resets the inactivity clock on a live/unpublished listing (back to `LIVE`).
   "viewCount": 12,
   "isFeatured": false,
   "publishedAt": "2026-07-21T09:00:00.000Z",
+  "soldRentedAt": null,
   "createdAt": "...",
   "updatedAt": "...",
   "photos": [
@@ -338,14 +437,16 @@ Resets the inactivity clock on a live/unpublished listing (back to `LIVE`).
   ],
   "owner": {
     "id": "uuid", "name": "Selam Tesfaye", "profilePhotoUrl": null,
-    "role": "AGENT", "agencyName": "Habesha Realty", "verificationStatus": "APPROVED"
+    "role": "AGENT", "agencyName": "Habesha Realty", "verificationStatus": "APPROVED",
+    "contactPhone": "+251911777888"
   }
 }
 ```
 
 > **Listing status lifecycle:**
 > `DRAFT → AWAITING_PAYMENT → AWAITING_REVIEW → LIVE`
-> plus `REJECTED`, `UNPUBLISHED` (inactivity), `ARCHIVED`.
+> plus `REJECTED`, `UNPUBLISHED` (inactivity), `SOLD`, `RENTED`, `ARCHIVED`.
+> `SOLD`/`RENTED` are owner-set and remain publicly visible with a badge.
 > `priceEtb` comes back as a **string** (it's a decimal) — parse it on the frontend.
 
 ### Private fields — which endpoints return them
@@ -395,9 +496,13 @@ Max 10 photos per listing; max ~8 MB per file; images only.
 ### `DELETE /listings/:listingId/photos/:photoId` 🔒
 Remove a photo.
 
-> **Dev note:** uploaded photos are served from `/uploads/...` on the API host in
-> development. In production these move to object storage — the `url`/`thumbUrl`
-> fields are what you render regardless, so no frontend change needed.
+> **Dev note:** uploaded photos are served as static files at `/uploads/...` on
+> the API host — **outside** the `/api/v1` prefix. So a `thumbUrl` of
+> `/uploads/listings/x_thumb.jpg` is fetched at `http://<host>/uploads/listings/x_thumb.jpg`
+> (note: no `/api/v1`). The `url`/`thumbUrl` fields already carry the right path —
+> resolve them against the server origin, not the API base. In production these
+> move to object storage and become absolute `https://...` URLs; render them
+> as-is with no change.
 
 ---
 
@@ -473,7 +578,7 @@ These power the web-based Admin Panel. A non-admin token gets `403`.
 | `GET /admin/listings/review-queue` | Listings awaiting review (paginated: `?page=&pageSize=`) |
 | `POST /admin/listings/:id/approve` | Approve → sets listing `LIVE` |
 | `POST /admin/listings/:id/reject` | Reject. Body: `{ "code": "DUPLICATE", "note": "optional context" }` — see rejection codes below |
-| `GET /admin/users` | All users (optional `?role=AGENT`) |
+| `GET /admin/users` | All users (optional `?role=AGENT`). Each user includes `isSuspended`, `suspendedReason`, `suspendedAt` for the Suspended badge |
 | `POST /admin/users/:id/suspend` | Body: `{ "reason": "..." }` |
 | `POST /admin/users/:id/unsuspend` | |
 | `GET /admin/verification/queue` | Agents pending verification |
@@ -509,11 +614,11 @@ returns a `400`.
 
 | Mockup screen | Primary endpoints |
 |---|---|
-| **Sign Up** | `POST /auth/otp/request`, `POST /auth/otp/verify` |
+| **Sign Up** | `POST /auth/otp/request`, `POST /auth/otp/verify`, `POST /auth/google` (Continue with Google → may return `needsPhone: true`, then OTP-attach) |
 | **Home Feed** | `GET /listings` (+ query params for filters/sort/map) |
-| **Listing Detail** | `GET /listings/:id`, `POST /favorites/:id`, `POST /listings/:id/report` |
+| **Listing Detail** | `GET /listings/:id` (owner object carries `contactPhone` for Call/WhatsApp), `POST /favorites/:id`, `POST /listings/:id/report` |
 | **Post a Listing** | `POST /listings`, `POST /listings/:id/photos`, `POST /listings/:id/submit`, `POST /payments/listing/initiate` — now includes building name / unit number / floor number fields |
-| **Owner/Agent Dashboard** | `GET /listings/mine/dashboard`, `PATCH`/`DELETE /listings/:id`, `POST /listings/:id/renew` — rejected listings now show `rejectionCode` + `rejectionReason`, so build a "fix and resubmit" path |
+| **Owner/Agent Dashboard** | `GET /listings/mine/dashboard`, `PATCH`/`DELETE /listings/:id`, `POST /listings/:id/renew`, `POST /listings/:id/mark-sold-rented`, `POST /listings/:id/mark-available` — rejected listings show `rejectionCode` + `rejectionReason`; editing a rejected listing re-queues it automatically |
 | **Search Filters** | `GET /listings` with filter params |
 | **Favorites** | `GET /favorites`, `DELETE /favorites/:id` |
 | **Admin Panel** | the `/admin/*` endpoints above |
@@ -527,4 +632,5 @@ returns a `400`.
 - **Fayda (national ID) verification** — will be required before a user can post
   their first listing. Endpoint shape TBD once onboarding credentials are in hand.
 - **In-app messaging** (Phase 2) — for now, contact is Call / WhatsApp / Telegram
-  links built on the frontend from the owner's phone number.
+  links built on the frontend from the owner's **`contactPhone`** (on the listing's
+  `owner` object, and on `GET /users/:id/public`). See Change Request 02.

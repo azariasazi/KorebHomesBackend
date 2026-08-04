@@ -15,9 +15,17 @@ export class UsersService {
   }
 
   async updateProfile(userId: string, dto: UpdateProfileDto) {
+    const data: Record<string, unknown> = { ...dto };
+
+    // An empty string means "clear my public number and fall back to my account
+    // phone" — store it as null rather than an empty string.
+    if (dto.publicContactPhone === '') {
+      data.publicContactPhone = null;
+    }
+
     const user = await this.prisma.user.update({
       where: { id: userId },
-      data: dto,
+      data,
     });
     return this.toPublicProfile(user);
   }
@@ -53,29 +61,45 @@ export class UsersService {
       role: user.role,
       agencyName: user.agencyName,
       isVerifiedAgent: user.role === UserRole.AGENT && user.verificationStatus === VerificationStatus.APPROVED,
+      // Public contact number if the user set one, else their account phone.
+      // Powers the Call / WhatsApp buttons on Listing Detail.
+      contactPhone: user.publicContactPhone ?? user.phone ?? null,
     };
   }
 
   private toPublicProfile(user: {
     id: string;
-    phone: string;
+    phone: string | null;
+    email: string | null;
+    googleId: string | null;
     name: string | null;
     profilePhotoUrl: string | null;
     city: string | null;
     role: UserRole;
     verificationStatus: VerificationStatus;
     agencyName: string | null;
+    publicContactPhone: string | null;
     createdAt: Date;
   }) {
     return {
       id: user.id,
       phone: user.phone,
+      email: user.email,
       name: user.name,
       profilePhotoUrl: user.profilePhotoUrl,
       city: user.city,
       role: user.role,
       verificationStatus: user.verificationStatus,
       agencyName: user.agencyName,
+      publicContactPhone: user.publicContactPhone,
+      // What actually shows on this user's listings today: their public number
+      // if set, otherwise their account phone (the informed-default behaviour).
+      effectiveContactPhone: user.publicContactPhone ?? user.phone,
+      // Account-state flags for the frontend:
+      hasGoogleLinked: user.googleId !== null,
+      // True when the account has no phone yet — the frontend must run the
+      // phone+OTP attach step before this user can post a listing.
+      needsPhone: user.phone === null,
       createdAt: user.createdAt,
     };
   }

@@ -55,6 +55,8 @@ enum ListingStatus {
   LIVE
   REJECTED
   UNPUBLISHED
+  SOLD
+  RENTED
   ARCHIVED
 }
 
@@ -94,13 +96,26 @@ enum ListingRejectionCode {
 
 model User {
   id                  String              @id @default(uuid())
-  phone               String              @unique
+  // Phone is the primary identity and is required to POST a listing, but it's
+  // now nullable so a Google-first user can exist before attaching one. Still
+  // unique when present — Postgres treats multiple NULLs as distinct, so many
+  // phone-less Google users don't collide on the unique index.
+  phone               String?             @unique
+  email               String?             @unique
+  googleId            String?             @unique
   name                String?
   profilePhotoUrl     String?
   city                String?
+
+  // Login phone (`phone` above) is used for auth and is never public.
+  // `publicContactPhone` is what's shown on the user's listings for Call /
+  // WhatsApp. When null, public responses fall back to the account phone —
+  // see resolveContactPhone() / the owner shape in ListingsService.
+  publicContactPhone  String?
   role                UserRole            @default(BUYER_RENTER)
   isSuspended         Boolean             @default(false)
   suspendedReason     String?
+  suspendedAt         DateTime?
 
   // Agent-specific verification
   verificationStatus  VerificationStatus  @default(NOT_SUBMITTED)
@@ -202,6 +217,7 @@ model Listing {
 
   publishedAt       DateTime?
   lastRenewedAt     DateTime?
+  soldRentedAt      DateTime?
   inactivityNudgeSentAt DateTime?
   penaltyMultiplierApplied Float? 
 

@@ -62,7 +62,7 @@ export class AuthService {
   // ---------------------------------------------------------------------
   // OTP verification -> issues tokens, creates user on first verification
   // ---------------------------------------------------------------------
-  async verifyOtp(phone: string, code: string, role?: UserRole, name?: string) {
+  async verifyOtp(phone: string, code: string, role?: UserRole, name?: string, authenticatedUserId?: string) {
     const maxAttempts = Number(this.config.get('OTP_MAX_ATTEMPTS') ?? 5);
 
     const otpRecord = await this.prisma.otpCode.findFirst({
@@ -94,13 +94,96 @@ export class AuthService {
       data: { consumedAt: new Date() },
     });
 
-    let user = await this.prisma.user.findUnique({ where: { phone } });
+    let user;
+
+    if (authenticatedUserId) {
+      // "Attach phone" path: a Google-first (or any logged-in) user is adding a
+      // phone to their EXISTING account. This is what keeps a Google user to a
+      // single account with both googleId and phone, rather than spawning a
+      // second phone-only account.
+      const authedUser = await this.prisma.user.findUnique({ where: { id: authenticatedUserId } });
+      if (!authedUser) {
+        throw new UnauthorizedException('Your session is no longer valid. Please sign in again.');
+      }
+
+      // Guard against stealing a phone already tied to a different account.
+      const phoneOwner = await this.prisma.user.findUnique({ where: { phone } });
+      if (phoneOwner && phoneOwner.id !== authedUser.id) {
+        throw new BadRequestException(
+          'This phone number is already linked to another account.',
+        );
+      }
+
+      user = await this.prisma.user.update({
+        where: { id: authedUser.id },
+        data: {
+          phone,
+          // Only fill name if they didn't already have one.
+          name: authedUser.name ?? name,
+        },
+      });
+    } else {
+      // Standard phone-first path: find or create an account keyed by phone.
+      user = await this.prisma.user.findUnique({ where: { phone } });
+      if (!user) {
+        user = await this.prisma.user.create({
+          data: {
+            phone,
+            name,
+            role: role ?? UserRole.BUYER_RENTER,
+          },
+        });
+      }
+    }
+
+    if (user.isSuspended) {
+      throw new ForbiddenException('This account has been suspended. Please contact support.');
+    }
+
+    return this.issueTokens(user.id, user.phone, user.role);
+  }
+
+  // ---------------------------------------------------------------------
+  // Google sign-in -> issues OUR tokens (same shape as OTP verify)
+  // ---------------------------------------------------------------------
+  async signInWithGoogle(profile: {
+    googleId: string;
+    email: string | null;
+    emailVerified: boolean;
+    name: string | null;
+    picture: string | null;
+  }) {
+    // 1. Already linked by googleId → straight sign-in.
+    let user = await this.prisma.user.findUnique({ where: { googleId: profile.googleId } });
+
+    // 2. Not linked yet, but a verified email matches an existing account → link.
+    //    Only when Google reports the email VERIFIED, so a matching-but-unverified
+    //    email can't be used to hijack an existing account.
+    if (!user && profile.email && profile.emailVerified) {
+      const byEmail = await this.prisma.user.findUnique({ where: { email: profile.email } });
+      if (byEmail) {
+        user = await this.prisma.user.update({
+          where: { id: byEmail.id },
+          data: {
+            googleId: profile.googleId,
+            // Backfill photo/name only if the account is missing them.
+            profilePhotoUrl: byEmail.profilePhotoUrl ?? profile.picture,
+            name: byEmail.name ?? profile.name,
+          },
+        });
+      }
+    }
+
+    // 3. Brand-new user → create with no phone yet (they'll attach one later).
     if (!user) {
       user = await this.prisma.user.create({
         data: {
-          phone,
-          name,
-          role: role ?? UserRole.BUYER_RENTER,
+          googleId: profile.googleId,
+          email: profile.email,
+          name: profile.name,
+          profilePhotoUrl: profile.picture,
+          phone: null,
+          role: UserRole.BUYER_RENTER,
         },
       });
     }
@@ -109,7 +192,11 @@ export class AuthService {
       throw new ForbiddenException('This account has been suspended. Please contact support.');
     }
 
-    return this.issueTokens(user.id, user.phone, user.role);
+    const tokens = await this.issueTokens(user.id, user.phone, user.role);
+
+    // needsPhone drives the frontend to run the existing phone+OTP attach step.
+    // A user can browse/favorite Google-only, but must have a phone to post.
+    return { ...tokens, needsPhone: user.phone === null };
   }
 
   // ---------------------------------------------------------------------
@@ -179,8 +266,8 @@ export class AuthService {
   // ---------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------
-  private async issueTokens(userId: string, phone: string, role: UserRole) {
-    const payload = { sub: userId, phone, role };
+  private async issueTokens(userId: string, phone: string | null, role: UserRole) {
+    const payload = { sub: userId, phone: phone ?? null, role };
 
     const accessToken = this.jwt.sign(payload, {
       secret: this.config.get('JWT_ACCESS_SECRET'),

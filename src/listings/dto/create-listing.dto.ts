@@ -90,8 +90,8 @@ export class CreateListingDto {
   @IsOptional()
   @Type(() => Number)
   @IsInt()
-  @Min(-1, { message: 'Floor number cannot be below -1.' })
-  @Max(100, { message: 'Floor number looks like a typo — must be 100 or below.' })
+  @Min(-5, { message: 'Floor number cannot be below -5.' })
+  @Max(200, { message: 'Floor number looks like a typo — must be 200 or below.' })
   floorNumber?: number;
 
   @IsOptional()

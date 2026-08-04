@@ -90,6 +90,89 @@ row or a typo fails safe (free) rather than accidentally charging people.
 
 ---
 
+## Applying Change Request 05 (Continue with Google)
+
+Adds Google sign-in alongside phone+OTP, makes `phone` nullable, and adds
+`googleId` / `email` to users.
+
+```bash
+npx prisma migrate dev --name cr05_google_signin
+npm test              # 37 tests — includes Google mapping + phone-attach guards
+```
+
+**Google Cloud setup (Azarias):** create an OAuth 2.0 Client ID in the Google
+Cloud Console, then put it in `.env`:
+
+```
+GOOGLE_CLIENT_ID=<your-client-id>.apps.googleusercontent.com
+```
+
+The frontend runs the Google SDK and posts the resulting ID token to
+`POST /auth/google`; the backend verifies it against this `GOOGLE_CLIENT_ID`.
+Until it's set, `POST /auth/google` returns a clear "not configured" error and
+the rest of auth is unaffected — so you can ship the migration before the Google
+project is ready.
+
+**Note on the migration:** `phone` becomes `String?` but stays `@unique`.
+Postgres treats multiple NULLs as distinct, so many phone-less Google users
+coexist fine under the unique index. Existing phone users are unaffected.
+
+---
+
+## Applying Change Request 04 (serve /uploads static files)
+
+**No migration.** This change makes the app serve uploaded photos over HTTP, so
+listing images actually display. Just rebuild/restart:
+
+```bash
+npm run start:dev
+```
+
+On startup you'll see a log line like
+`Serving uploads from /…/koreb-backend/uploads at /uploads/`. Confirm it works by
+opening any image URL directly, e.g.
+`http://localhost:3000/uploads/listings/<id>_thumb.jpg` — it should return the
+image, not "Cannot GET /uploads/…".
+
+The served folder is resolved by the **same helper** the upload code writes with
+(`src/common/uploads.path.ts`), so the save path and the served path can't drift
+apart — the usual reason this fix appears done but still 404s. If you set a
+custom `STORAGE_LOCAL_PATH` in `.env`, both sides follow it automatically.
+
+---
+
+## Applying Change Request 03 (sold/rented, suspension detail, floor range)
+
+```bash
+npx prisma migrate dev --name cr03_sold_rented_and_suspension
+npm run prisma:seed   # optional
+npm test              # 26 tests
+```
+
+Adds `SOLD`/`RENTED` to the listing status enum plus a `soldRentedAt` timestamp,
+and a `suspendedAt` timestamp on users. Owners get `POST /listings/:id/mark-sold-rented`
+and `.../mark-available`; sold/rented listings stay in search (badged, sorted last).
+`GET /admin/users` now returns suspension detail. Editing a rejected listing
+re-queues it for review automatically.
+
+---
+
+## Applying Change Request 02 (public contact number)
+
+Adds a `publicContactPhone` column so Call / WhatsApp on Listing Detail work.
+
+```bash
+npx prisma migrate dev --name add_public_contact_phone
+npm run prisma:seed   # optional: refreshes demo data
+npm test              # 18 tests — includes the login-phone-privacy guard
+```
+
+The listing's `owner` object and `GET /users/:id/public` now return a single
+`contactPhone` (public number if set, else the account phone). The raw login
+`phone` is never exposed publicly — a test enforces this.
+
+---
+
 ## Applying Change Request 01 (unit fields + structured rejections)
 
 If you already have a database from before this change, run these in order:

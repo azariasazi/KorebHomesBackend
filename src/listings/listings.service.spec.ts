@@ -37,7 +37,16 @@ describe('ListingsService — public responses must not leak private fields', ()
     floorNumber: 4,
     status: ListingStatus.LIVE,
     photos: [],
-    owner: { id: 'owner-uuid', name: 'Selam Tesfaye', role: 'AGENT' },
+    owner: {
+      id: 'owner-uuid',
+      name: 'Selam Tesfaye',
+      role: 'AGENT',
+      // Both phone fields as Prisma would now return them from the owner select.
+      // The login `phone` must be stripped from public output; `contactPhone`
+      // (resolved from these two) is what may appear.
+      phone: '+251911111111',
+      publicContactPhone: '+251922222222',
+    },
     // --- private: must never reach a public response ---
     unitNumber: '4B',
     rejectionCode: 'DUPLICATE',
@@ -47,7 +56,9 @@ describe('ListingsService — public responses must not leak private fields', ()
 
   /**
    * Mimics Prisma's actual behaviour, which is the whole point of the test:
-   *   - `select`  -> returns ONLY the named fields
+   *   - `select`  -> returns ONLY the named fields (applied at top level AND to
+   *     the nested owner select, so the owner arrives with its phone fields
+   *     exactly as the real query would deliver them)
    *   - `include` -> returns EVERY scalar on the model, plus the relations
    * Without this, a mock would just echo back whatever we handed it and the
    * return-shape assertions would pass even against leaking code.
@@ -55,7 +66,15 @@ describe('ListingsService — public responses must not leak private fields', ()
   const applyPrismaShaping = (args: any) => {
     if (args?.select) {
       return Object.keys(args.select).reduce((acc: any, key) => {
-        if (key in fullDbRow) acc[key] = (fullDbRow as any)[key];
+        if (key === 'owner' && args.select.owner?.select) {
+          // Nested owner select: return only the owner fields that were asked for.
+          acc.owner = Object.keys(args.select.owner.select).reduce((o: any, k) => {
+            if (fullDbRow.owner && k in fullDbRow.owner) o[k] = (fullDbRow.owner as any)[k];
+            return o;
+          }, {});
+        } else if (key in fullDbRow) {
+          acc[key] = (fullDbRow as any)[key];
+        }
         return acc;
       }, {});
     }
@@ -121,6 +140,43 @@ describe('ListingsService — public responses must not leak private fields', ()
           expect(item).not.toHaveProperty(field);
         }
       }
+    });
+  });
+
+  describe('owner contact number (Change Request 02)', () => {
+    it('exposes contactPhone on the owner of a listing detail', async () => {
+      const result: any = await service.findOnePublic('listing-uuid');
+      expect(result.owner.contactPhone).toBe('+251922222222'); // the public number
+    });
+
+    it('NEVER exposes the raw login `phone` on a public owner object', async () => {
+      const detail: any = await service.findOnePublic('listing-uuid');
+      expect(detail.owner).not.toHaveProperty('phone');
+      expect(detail.owner).not.toHaveProperty('publicContactPhone');
+
+      const search: any = await service.search({});
+      for (const item of search.items) {
+        expect(item.owner).not.toHaveProperty('phone');
+        expect(item.owner).not.toHaveProperty('publicContactPhone');
+      }
+    });
+
+    it('falls back to the account phone when no public number is set', async () => {
+      // Point the mock owner at a null public number for this case.
+      (fullDbRow.owner as any).publicContactPhone = null;
+      const result: any = await service.findOnePublic('listing-uuid');
+      expect(result.owner.contactPhone).toBe('+251911111111'); // account phone
+      // restore for other tests
+      (fullDbRow.owner as any).publicContactPhone = '+251922222222';
+    });
+
+    it('still never leaks the login phone even when it is the fallback source', async () => {
+      (fullDbRow.owner as any).publicContactPhone = null;
+      const result: any = await service.findOnePublic('listing-uuid');
+      // contactPhone equals the account number, but there is no bare `phone` key
+      expect(result.owner).not.toHaveProperty('phone');
+      expect(result.owner.contactPhone).toBe('+251911111111');
+      (fullDbRow.owner as any).publicContactPhone = '+251922222222';
     });
   });
 });

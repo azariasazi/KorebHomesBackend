@@ -5,6 +5,7 @@ import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { JwtRefreshStrategy } from './strategies/jwt-refresh.strategy';
+import { GoogleAuthService } from './providers/google-auth.service';
 import { SMS_PROVIDER } from '../common/interfaces/sms-provider.interface';
 import { ConsoleSmsProvider } from './providers/sms/console-sms.provider';
 
@@ -13,6 +14,7 @@ import { ConsoleSmsProvider } from './providers/sms/console-sms.provider';
   controllers: [AuthController],
   providers: [
     AuthService,
+    GoogleAuthService,
     JwtStrategy,
     JwtRefreshStrategy,
     // Swap ConsoleSmsProvider for a real implementation of SmsProvider when a

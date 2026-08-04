@@ -1,17 +1,36 @@
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe } from '@nestjs/common';
+import { ValidationPipe, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
+import { resolveUploadsDir, UPLOADS_URL_PREFIX } from './common/uploads.path';
 
 async function bootstrap() {
   // rawBody: true lets the Chapa webhook handler access the unparsed request
   // body needed to verify the signature (req.rawBody).
-  const app = await NestFactory.create(AppModule, { rawBody: true });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { rawBody: true });
   const config = app.get(ConfigService);
 
-  app.use(helmet());
+  // helmet's default Cross-Origin-Resource-Policy is "same-origin", which would
+  // block the web/mobile frontend (running on a different origin in dev) from
+  // loading listing images served below. "cross-origin" lets images load while
+  // keeping helmet's other protections.
+  app.use(
+    helmet({
+      crossOriginResourcePolicy: { policy: 'cross-origin' },
+    }),
+  );
+
+  // --- Serve uploaded listing photos as static files at /uploads ---
+  // resolveUploadsDir() is the SAME helper PhotosService uses to decide where to
+  // WRITE files, so the served folder and the saved folder can never diverge.
+  // This sits OUTSIDE the global API prefix on purpose: images live at
+  // /uploads/... while the API lives at /api/v1/... .
+  const uploadsDir = resolveUploadsDir(config.get<string>('STORAGE_LOCAL_PATH'));
+  app.useStaticAssets(uploadsDir, { prefix: `${UPLOADS_URL_PREFIX}/` });
+  new Logger('Bootstrap').log(`Serving uploads from ${uploadsDir} at ${UPLOADS_URL_PREFIX}/`);
 
   const corsOrigins = (config.get<string>('CORS_ORIGINS') ?? '')
     .split(',')

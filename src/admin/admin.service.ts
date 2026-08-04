@@ -111,6 +111,8 @@ export class AdminService {
         role: true,
         city: true,
         isSuspended: true,
+        suspendedReason: true,
+        suspendedAt: true,
         verificationStatus: true,
         agencyName: true,
         createdAt: true,
@@ -126,7 +128,7 @@ export class AdminService {
     }
     return this.prisma.user.update({
       where: { id: userId },
-      data: { isSuspended: true, suspendedReason: reason },
+      data: { isSuspended: true, suspendedReason: reason, suspendedAt: new Date() },
     });
   }
 
@@ -135,7 +137,7 @@ export class AdminService {
     if (!user) throw new NotFoundException('User not found.');
     return this.prisma.user.update({
       where: { id: userId },
-      data: { isSuspended: false, suspendedReason: null },
+      data: { isSuspended: false, suspendedReason: null, suspendedAt: null },
     });
   }
 

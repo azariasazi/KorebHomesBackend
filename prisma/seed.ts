@@ -83,6 +83,7 @@ async function main() {
       role: UserRole.AGENT,
       agencyName: 'Habesha Realty',
       city: 'Addis Ababa',
+      publicContactPhone: '+251911777888', // business line shown on listings
       verificationStatus: VerificationStatus.APPROVED,
       verifiedAt: new Date(),
       verifiedByAdminId: admin.id,

@@ -37,6 +37,16 @@ export class PaymentsService {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new NotFoundException('User not found.');
 
+    // A phone is required to pay. In normal flow the user already has one
+    // (posting a listing is gated on needsPhone), but a Google-first account
+    // without a phone must never reach Chapa with a null number — fail clearly
+    // instead. This check also narrows user.phone to a plain string below.
+    if (!user.phone) {
+      throw new BadRequestException(
+        'Please add a phone number to your account before paying for a listing.',
+      );
+    }
+
     const amountEtb = await this.resolveListingFee(user.role);
     const txRef = `koreb-${listingId.slice(0, 8)}-${randomUUID().slice(0, 8)}`;
 

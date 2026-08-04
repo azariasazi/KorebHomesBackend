@@ -1,9 +1,24 @@
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma, ListingStatus, UserRole } from '@prisma/client';
+import { Prisma, ListingStatus, ListingType, UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateListingDto } from './dto/create-listing.dto';
 import { UpdateListingDto } from './dto/update-listing.dto';
 import { SearchListingsDto, ListingSort } from './dto/search-listings.dto';
+
+/**
+ * Statuses that may appear in public search / detail.
+ *
+ * Explicit allow-list, deliberately not "everything except DRAFT". Same
+ * fail-closed reasoning as the field select: a status added to the enum later
+ * (e.g. a future ARCHIVED-but-visible idea) stays invisible to the public until
+ * someone consciously lists it here. SOLD/RENTED are included so they show with
+ * a badge; they are sorted to the bottom (see search()).
+ */
+const PUBLICLY_VISIBLE_STATUSES: ListingStatus[] = [
+  ListingStatus.LIVE,
+  ListingStatus.SOLD,
+  ListingStatus.RENTED,
+];
 
 /**
  * Explicit allow-list of fields returned by PUBLIC endpoints.
@@ -44,6 +59,7 @@ const PUBLIC_LISTING_SELECT = {
   viewCount: true,
   isFeatured: true,
   publishedAt: true,
+  soldRentedAt: true,
   createdAt: true,
   updatedAt: true,
   photos: {
@@ -58,9 +74,38 @@ const PUBLIC_LISTING_SELECT = {
       role: true,
       agencyName: true,
       verificationStatus: true,
+      // Both are selected so the public contact number can be resolved with a
+      // fallback. shapePublicOwner() collapses them into a single `contactPhone`
+      // and removes the raw login `phone` — it must NEVER leave this service.
+      phone: true,
+      publicContactPhone: true,
     },
   },
 };
+
+/**
+ * Resolves the number shown on a listing (public number if set, else the
+ * account phone) and strips the raw login `phone` from the owner object.
+ *
+ * The login phone is selected only to power the fallback; it must never appear
+ * in a public response as its own field. This function is the one place that
+ * guarantees that, so every public path routes through it.
+ */
+function shapePublicOwner<T extends { phone?: string | null; publicContactPhone?: string | null }>(
+  owner: T | null | undefined,
+) {
+  if (!owner) return owner;
+  const { phone, publicContactPhone, ...rest } = owner;
+  return { ...rest, contactPhone: publicContactPhone ?? phone ?? null };
+}
+
+/** Applies shapePublicOwner to a full listing row coming out of a public query. */
+function shapePublicListing<T extends { owner?: any }>(listing: T): T {
+  if (listing && listing.owner) {
+    return { ...listing, owner: shapePublicOwner(listing.owner) };
+  }
+  return listing;
+}
 
 @Injectable()
 export class ListingsService {
@@ -140,7 +185,7 @@ export class ListingsService {
     const pageSize = dto.pageSize ?? 20;
 
     const where: Prisma.ListingWhereInput = {
-      status: ListingStatus.LIVE,
+      status: { in: PUBLICLY_VISIBLE_STATUSES },
       ...(dto.city && { city: { equals: dto.city, mode: 'insensitive' } }),
       ...(dto.subCity && { subCity: { equals: dto.subCity, mode: 'insensitive' } }),
       ...(dto.propertyType && { propertyType: dto.propertyType }),
@@ -166,12 +211,20 @@ export class ListingsService {
       }),
     };
 
-    const orderBy: Prisma.ListingOrderByWithRelationInput =
+    // Available (LIVE) listings always rank above SOLD/RENTED ones, whatever
+    // the user's chosen sort. LIVE listings have soldRentedAt = null, so
+    // nulls-first floats them to the top; the chosen sort orders within each group.
+    const secondarySort =
       dto.sort === ListingSort.PRICE_ASC
-        ? { priceEtb: 'asc' }
+        ? { priceEtb: 'asc' as const }
         : dto.sort === ListingSort.PRICE_DESC
-          ? { priceEtb: 'desc' }
-          : { publishedAt: 'desc' };
+          ? { priceEtb: 'desc' as const }
+          : { publishedAt: 'desc' as const };
+
+    const orderBy: Prisma.ListingOrderByWithRelationInput[] = [
+      { soldRentedAt: { sort: 'asc', nulls: 'first' } },
+      secondarySort,
+    ];
 
     const [items, total] = await this.prisma.$transaction([
       this.prisma.listing.findMany({
@@ -185,7 +238,7 @@ export class ListingsService {
     ]);
 
     return {
-      items,
+      items: items.map(shapePublicListing),
       total,
       page,
       pageSize,
@@ -201,7 +254,7 @@ export class ListingsService {
       where: { id },
       select: PUBLIC_LISTING_SELECT,
     });
-    if (!listing || listing.status !== ListingStatus.LIVE) {
+    if (!listing || !PUBLICLY_VISIBLE_STATUSES.includes(listing.status as ListingStatus)) {
       throw new NotFoundException('Listing not found.');
     }
 
@@ -209,7 +262,7 @@ export class ListingsService {
       .update({ where: { id }, data: { viewCount: { increment: 1 } } })
       .catch(() => undefined);
 
-    return listing;
+    return shapePublicListing(listing);
   }
 
   // ---------------------------------------------------------------------
@@ -229,12 +282,23 @@ export class ListingsService {
 
   async update(id: string, userId: string, dto: UpdateListingDto) {
     const listing = await this.getOwnedListingOrThrow(id, userId);
-    if (listing.status === ListingStatus.LIVE) {
-      // Edits to a live listing go back through review to prevent
-      // bait-and-switch listings (post approved, then edit to something else).
+
+    // Editing a LIVE or REJECTED listing sends it back through review:
+    //  - LIVE: prevents bait-and-switch (post something approved, then quietly
+    //    change it to something else).
+    //  - REJECTED: an edit IS the fix, so re-queue it and clear the previous
+    //    rejection detail — no separate submit() call needed. A redundant
+    //    submit() afterwards is harmless (it no-ops on an already-queued listing).
+    if (listing.status === ListingStatus.LIVE || listing.status === ListingStatus.REJECTED) {
       return this.prisma.listing.update({
         where: { id },
-        data: { ...dto, status: ListingStatus.AWAITING_REVIEW },
+        data: {
+          ...dto,
+          status: ListingStatus.AWAITING_REVIEW,
+          rejectionCode: null,
+          rejectionReason: null,
+          rejectedAt: null,
+        },
       });
     }
     return this.prisma.listing.update({ where: { id }, data: dto });
@@ -256,6 +320,50 @@ export class ListingsService {
       where: { id },
       data: {
         status: ListingStatus.LIVE,
+        lastRenewedAt: new Date(),
+        inactivityNudgeSentAt: null,
+      },
+    });
+  }
+
+  /**
+   * Owner/Agent marks a listing as sold or rented.
+   *
+   * Only a LIVE listing can be marked — you can't sell something that isn't
+   * published. The listing STAYS in search (greyed out with a badge on the
+   * frontend); it does not disappear. `SOLD` vs `RENTED` is inferred from the
+   * listing's own listingType so the frontend can't send a mismatched status
+   * (a for-rent property marked "SOLD").
+   */
+  async markSoldOrRented(id: string, userId: string) {
+    const listing = await this.getOwnedListingOrThrow(id, userId);
+    if (listing.status !== ListingStatus.LIVE) {
+      throw new ForbiddenException('Only a live listing can be marked as sold or rented.');
+    }
+    const newStatus =
+      listing.listingType === ListingType.RENT ? ListingStatus.RENTED : ListingStatus.SOLD;
+
+    return this.prisma.listing.update({
+      where: { id },
+      data: { status: newStatus, soldRentedAt: new Date() },
+    });
+  }
+
+  /**
+   * Owner/Agent reverses a sold/rented mark (e.g. a deal fell through, or they
+   * tapped it by mistake). Returns the listing to LIVE and resets the
+   * inactivity clock so it isn't immediately caught by the auto-unpublish job.
+   */
+  async markAvailableAgain(id: string, userId: string) {
+    const listing = await this.getOwnedListingOrThrow(id, userId);
+    if (listing.status !== ListingStatus.SOLD && listing.status !== ListingStatus.RENTED) {
+      throw new ForbiddenException('Only a sold or rented listing can be marked available again.');
+    }
+    return this.prisma.listing.update({
+      where: { id },
+      data: {
+        status: ListingStatus.LIVE,
+        soldRentedAt: null,
         lastRenewedAt: new Date(),
         inactivityNudgeSentAt: null,
       },

@@ -5,6 +5,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import sharp from 'sharp';
 import { randomUUID } from 'crypto';
+import { resolveUploadsDir, UPLOADS_URL_PREFIX } from '../common/uploads.path';
 
 /**
  * Handles listing photo uploads: validates the per-listing photo cap,
@@ -94,7 +95,10 @@ export class PhotosService {
       .toBuffer();
 
     if (driver === 'local') {
-      const basePath = this.config.get<string>('STORAGE_LOCAL_PATH') ?? './uploads';
+      // Same helper main.ts uses to SERVE files, so the save path and the
+      // served path are guaranteed identical. UPLOADS_URL_PREFIX keeps the
+      // returned URLs in lockstep with the static route.
+      const basePath = resolveUploadsDir(this.config.get<string>('STORAGE_LOCAL_PATH'));
       const listingsDir = path.join(basePath, 'listings');
       fs.mkdirSync(listingsDir, { recursive: true });
 
@@ -104,8 +108,8 @@ export class PhotosService {
       fs.writeFileSync(path.join(listingsDir, thumbFile), thumbBuffer);
 
       return {
-        fullUrl: `/uploads/listings/${fullFile}`,
-        thumbUrl: `/uploads/listings/${thumbFile}`,
+        fullUrl: `${UPLOADS_URL_PREFIX}/listings/${fullFile}`,
+        thumbUrl: `${UPLOADS_URL_PREFIX}/listings/${thumbFile}`,
       };
     }
 
