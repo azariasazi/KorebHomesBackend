@@ -45,8 +45,9 @@ before a user can post. A Google-first user is signed in immediately with
 
 1. User enters their phone number → frontend calls `POST /auth/otp/request`.
 2. User receives an SMS code → frontend calls `POST /auth/otp/verify` with the
-   code. On the **first** verify for a new phone, this also creates the account
-   (pass `role` and optionally `name`). On subsequent verifies it just logs in.
+   code and a `flow` of `"signup"` or `"login"`. On **signup**, a first verify
+   for a new phone creates the account (pass `role`, optionally `name`); on
+   **login**, an unknown phone returns `404` instead of creating an account.
 3. The verify response returns `accessToken`, `refreshToken`, and `user`.
    - Store both tokens securely (e.g. secure storage on mobile, httpOnly cookie
      or secure storage on web).
@@ -79,22 +80,42 @@ Request an SMS verification code. *(Rate-limited: ~3/min.)*
 ---
 
 ### `POST /auth/otp/verify`
-Verify the code. Behaviour depends on whether the request carries an access token:
-- **No token (normal signup/login):** creates the account on first use, logs in thereafter.
-- **With a valid `Authorization: Bearer` token (attach phone):** attaches the
-  verified phone to the *currently authenticated* account. This is how a
-  Google-first user (who has no phone yet) ends up with ONE account holding both
-  their Google identity and their phone — not a second account.
+Verify the code. Behaviour depends on the `flow` field and whether the request
+carries an access token.
 
 **Body**
 ```json
 {
   "phone": "+251912345678",
   "code": "123456",
-  "role": "OWNER",   // optional; only used on first-time signup. Omit for login.
-  "name": "Dawit Alemu"  // optional
+  "flow": "login",       // "signup" or "login". See table below.
+  "role": "OWNER",       // optional; only used when flow = "signup" on first use
+  "name": "Dawit Alemu"  // optional; only used when flow = "signup"
 }
 ```
+
+**`flow` controls whether an account may be created:**
+
+| `flow` | Account exists? | Result |
+|---|---|---|
+| `signup` | No | Create the account, log in. `201`. |
+| `signup` | Yes | Log in normally (no duplicate). `201`. |
+| `login` | Yes | Log in. `201`. |
+| `login` | No | **`404`** — `"No account found for this phone number. Please sign up."` No account is created. |
+
+The frontend already knows which screen it's on (Sign Up vs Log In), so send the
+matching `flow`. On the Log In screen, catch the `404` and route the person to
+Sign Up.
+
+- **`flow` is optional for backward compatibility** — if omitted, it defaults to
+  `signup` (the old permissive behavior) so an in-flight frontend build doesn't
+  break. Always send it going forward.
+- **With a valid `Authorization: Bearer` token (attach phone):** `flow` is
+  ignored. The verified phone is attached to the *currently authenticated*
+  account — this is how a Google-first user ends up with ONE account holding both
+  their Google identity and their phone. Attaching a phone already linked to a
+  different account returns `400`.
+
 **Response `201`**
 ```json
 {
@@ -103,7 +124,6 @@ Verify the code. Behaviour depends on whether the request carries an access toke
   "user": { "id": "uuid", "phone": "+251912345678", "role": "OWNER" }
 }
 ```
-Attaching a phone already linked to a different account returns `400`.
 
 ---
 

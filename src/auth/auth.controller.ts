@@ -34,7 +34,7 @@ export class AuthController {
   @UseGuards(OptionalJwtAuthGuard)
   @Post('otp/verify')
   verifyOtp(@Body() dto: VerifyOtpDto, @CurrentUser('id') authenticatedUserId?: string) {
-    return this.authService.verifyOtp(dto.phone, dto.code, dto.role, dto.name, authenticatedUserId);
+    return this.authService.verifyOtp(dto.phone, dto.code, dto.role, dto.name, authenticatedUserId, dto.flow);
   }
 
   /**

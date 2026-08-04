@@ -189,3 +189,94 @@ describe('AuthService — attach phone to an authenticated (Google-first) user',
     ).rejects.toThrow();
   });
 });
+
+describe('AuthService — signup vs login flow (CR-06)', () => {
+  let service: AuthService;
+  let prismaMock: any;
+  let existingUser: any;
+
+  const jwtMock = { sign: jest.fn().mockReturnValue('signed-token') };
+  const configMock = { get: jest.fn().mockReturnValue('30d') };
+  const smsMock = { send: jest.fn() };
+
+  const buildService = (userForPhone: any) => {
+    existingUser = userForPhone;
+    prismaMock = {
+      otpCode: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'otp-1',
+          codeHash: '$2b$10$placeholder',
+          attempts: 0,
+          expiresAt: new Date(Date.now() + 60000),
+          consumedAt: null,
+        }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+      user: {
+        // No authenticatedUserId in these tests, so only the phone lookup matters.
+        findUnique: jest.fn(async ({ where }: any) => (where.phone ? existingUser : null)),
+        create: jest.fn(async ({ data }: any) => ({ id: 'created-id', isSuspended: false, ...data })),
+        update: jest.fn(),
+      },
+      refreshToken: { create: jest.fn().mockResolvedValue({}) },
+    };
+    const s = new AuthService(prismaMock, jwtMock as any, configMock as any, smsMock as any);
+    jest.spyOn(require('bcrypt'), 'compare').mockResolvedValue(true as any);
+    jest.spyOn(require('bcrypt'), 'hash').mockResolvedValue('hashed' as any);
+    return s;
+  };
+
+  afterEach(() => jest.restoreAllMocks());
+
+  const { AuthFlow } = require('./dto/verify-otp.dto');
+
+  it('LOGIN + no account → throws 404, does NOT create', async () => {
+    service = buildService(null);
+    await expect(
+      service.verifyOtp('+251912345678', '123456', undefined, undefined, undefined, AuthFlow.LOGIN),
+    ).rejects.toThrow(/no account found/i);
+    expect(prismaMock.user.create).not.toHaveBeenCalled();
+  });
+
+  it('LOGIN + account exists → logs in, no account created', async () => {
+    service = buildService({
+      id: 'u1',
+      phone: '+251912345678',
+      role: 'OWNER',
+      isSuspended: false,
+    });
+    const res: any = await service.verifyOtp(
+      '+251912345678', '123456', undefined, undefined, undefined, AuthFlow.LOGIN,
+    );
+    expect(prismaMock.user.create).not.toHaveBeenCalled();
+    expect(res.accessToken).toBeDefined();
+  });
+
+  it('SIGNUP + no account → creates the account', async () => {
+    service = buildService(null);
+    await service.verifyOtp(
+      '+251912345678', '123456', 'OWNER' as any, 'Dawit', undefined, AuthFlow.SIGNUP,
+    );
+    expect(prismaMock.user.create).toHaveBeenCalled();
+  });
+
+  it('SIGNUP + account exists → logs in without duplicating', async () => {
+    service = buildService({
+      id: 'u1',
+      phone: '+251912345678',
+      role: 'OWNER',
+      isSuspended: false,
+    });
+    await service.verifyOtp(
+      '+251912345678', '123456', undefined, undefined, undefined, AuthFlow.SIGNUP,
+    );
+    expect(prismaMock.user.create).not.toHaveBeenCalled();
+  });
+
+  it('flow omitted (old frontend) → defaults to signup, still creates', async () => {
+    service = buildService(null);
+    // No flow arg at all — mimics a cached frontend build.
+    await service.verifyOtp('+251912345678', '123456', 'OWNER' as any, 'Dawit');
+    expect(prismaMock.user.create).toHaveBeenCalled();
+  });
+});

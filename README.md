@@ -90,6 +90,19 @@ row or a typo fails safe (free) rather than accidentally charging people.
 
 ---
 
+## Applying Change Request 06 (signup vs login flow)
+
+**No migration** — code only. `POST /auth/otp/verify` now takes a `flow` field
+(`"signup"` or `"login"`). Login with an unknown phone returns `404` instead of
+silently creating an account; signup is unchanged. Omitting `flow` defaults to
+`signup` for backward compatibility.
+
+```bash
+npm test   # 42 tests
+```
+
+---
+
 ## Applying Change Request 05 (Continue with Google)
 
 Adds Google sign-in alongside phone+OTP, makes `phone` nullable, and adds

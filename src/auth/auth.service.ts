@@ -3,6 +3,7 @@ import {
   ForbiddenException,
   Inject,
   Injectable,
+  NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -12,6 +13,7 @@ import { randomInt } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { SMS_PROVIDER, SmsProvider } from '../common/interfaces/sms-provider.interface';
 import { UserRole } from '@prisma/client';
+import { AuthFlow } from './dto/verify-otp.dto';
 
 @Injectable()
 export class AuthService {
@@ -62,7 +64,14 @@ export class AuthService {
   // ---------------------------------------------------------------------
   // OTP verification -> issues tokens, creates user on first verification
   // ---------------------------------------------------------------------
-  async verifyOtp(phone: string, code: string, role?: UserRole, name?: string, authenticatedUserId?: string) {
+  async verifyOtp(
+    phone: string,
+    code: string,
+    role?: UserRole,
+    name?: string,
+    authenticatedUserId?: string,
+    flow: AuthFlow = AuthFlow.SIGNUP,
+  ) {
     const maxAttempts = Number(this.config.get('OTP_MAX_ATTEMPTS') ?? 5);
 
     const otpRecord = await this.prisma.otpCode.findFirst({
@@ -123,9 +132,18 @@ export class AuthService {
         },
       });
     } else {
-      // Standard phone-first path: find or create an account keyed by phone.
+      // Standard phone-first path: find or (for signup) create an account.
       user = await this.prisma.user.findUnique({ where: { phone } });
       if (!user) {
+        // Log In is strict: never create an account for an unknown number.
+        // The frontend catches this 404 and routes the person to Sign Up.
+        // (flow defaults to signup, so an older frontend that omits `flow`
+        // keeps today's permissive create-on-verify behavior.)
+        if (flow === AuthFlow.LOGIN) {
+          throw new NotFoundException(
+            'No account found for this phone number. Please sign up.',
+          );
+        }
         user = await this.prisma.user.create({
           data: {
             phone,
