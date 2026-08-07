@@ -8,6 +8,7 @@ import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { resolveUploadsDir, UPLOADS_URL_PREFIX } from './common/uploads.path';
 
 async function bootstrap() {
+  console.log('BOOT CHECK — JWT_ACCESS_SECRET:', process.env.JWT_ACCESS_SECRET ? 'present, ' + process.env.JWT_ACCESS_SECRET.length + ' chars' : 'MISSING');
   // rawBody: true lets the Chapa webhook handler access the unparsed request
   // body needed to verify the signature (req.rawBody).
   const app = await NestFactory.create<NestExpressApplication>(AppModule, { rawBody: true });
