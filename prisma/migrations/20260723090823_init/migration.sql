@@ -1,6 +1,3 @@
--- CreateExtension
-CREATE EXTENSION IF NOT EXISTS "postgis";
-
 -- CreateEnum
 CREATE TYPE "UserRole" AS ENUM ('BUYER_RENTER', 'OWNER', 'AGENT', 'ADMIN');
 
