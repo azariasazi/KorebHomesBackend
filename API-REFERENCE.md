@@ -36,158 +36,141 @@ NestJS controllers in the `koreb-backend` codebase.
 
 ## Authentication flow (how login actually works)
 
-Koreb uses **phone number + SMS OTP** as its primary login — there are no
-passwords. **"Continue with Google"** is an optional fast path (see
-`POST /auth/google`): it signs a user in, but because listings expose a contact
-phone and Fayda ID verification is phone-anchored, a phone is still required
-before a user can post. A Google-first user is signed in immediately with
-`needsPhone: true`, then attaches a phone via the same OTP flow below.
+Koreb uses **password-based auth**. An account is created with first name, last
+name, phone, password, and an **optional** email. To keep SMS costs low, a new
+account is verified by **email when an email is given** (free) and by **SMS only
+when it isn't** (fallback). Sign-in is by **phone _or_ email + password**.
 
-1. User enters their phone number → frontend calls `POST /auth/otp/request`.
-2. User receives an SMS code → frontend calls `POST /auth/otp/verify` with the
-   code and a `flow` of `"signup"` or `"login"`. On **signup**, a first verify
-   for a new phone creates the account (pass `role`, optionally `name`); on
-   **login**, an unknown phone returns `404` instead of creating an account.
-3. The verify response returns `accessToken`, `refreshToken`, and `user`.
-   - Store both tokens securely (e.g. secure storage on mobile, httpOnly cookie
-     or secure storage on web).
-   - Send `accessToken` as a Bearer token on every protected request.
-4. When the access token expires (~15 min), call `POST /auth/refresh` with the
-   `refreshToken` to get a fresh pair. **Refresh tokens rotate** — each refresh
-   returns a new refresh token and invalidates the old one, so always replace
-   the stored one.
+**"Continue with Google"** remains an optional fast path (`POST /auth/google`):
+it signs a user in, but a phone is still required before posting a listing, so a
+Google-first user comes back with `needsPhone: true`.
 
-> **In development**, there is no real SMS provider wired up yet — the OTP code
-> is printed to the backend server console. Watch the terminal running the API
-> to get the code while testing.
+**Signup → verify → logged in:**
+1. `POST /auth/signup` with the fields. The account is created **unverified**;
+   the response says whether a code was sent by `email` or `sms`, and returns a
+   `userId`.
+2. The user enters the code → `POST /auth/verify-email` (or
+   `/auth/verify-phone-signup`) with that `userId` and the code. On success the
+   account is verified and the response returns `accessToken` + `refreshToken` —
+   the user is now logged in.
+3. Store both tokens; send `accessToken` as a Bearer token on protected routes.
+   When it expires (~15 min), call `POST /auth/refresh`. **Refresh tokens
+   rotate** — replace the stored one each time.
+
+**Login:** `POST /auth/login` with `identifier` (phone or email) + `password`.
+Fails with a uniform error if the account is missing or the password is wrong,
+and is blocked until the account is verified.
+
+**A phone is required to post a listing.** Email-first users (and Google users)
+verify their phone via `POST /auth/phone/request` + `/auth/phone/verify` before
+posting — this is the only step that costs an SMS for those users.
+
+> **In development**, no real email/SMS provider is wired up — the verification
+> code is printed to the backend server console. Watch the terminal to get it.
 
 ---
 
 ## Auth endpoints
 
-### `POST /auth/otp/request`
-Request an SMS verification code. *(Rate-limited: ~3/min.)*
-
-**Body**
-```json
-{ "phone": "+251912345678" }
-```
-**Response `201`**
-```json
-{ "message": "Verification code sent.", "expiresInSeconds": 300 }
-```
-
----
-
-### `POST /auth/otp/verify`
-Verify the code. Behaviour depends on the `flow` field and whether the request
-carries an access token.
-
+### `POST /auth/signup`
+Create an account. Email optional for regular users; **required for admins**
+(admins are created by the super admin, not here).
 **Body**
 ```json
 {
+  "firstName": "Dawit",
+  "lastName": "Alemu",
   "phone": "+251912345678",
-  "code": "123456",
-  "flow": "login",       // "signup" or "login". See table below.
-  "role": "OWNER",       // optional; only used when flow = "signup" on first use
-  "name": "Dawit Alemu"  // optional; only used when flow = "signup"
+  "email": "[email protected]",   // optional
+  "password": "atleast8chars",
+  "role": "OWNER"                    // optional: BUYER_RENTER | OWNER | AGENT
 }
 ```
-
-**`flow` controls whether an account may be created:**
-
-| `flow` | Account exists? | Result |
-|---|---|---|
-| `signup` | No | Create the account, log in. `201`. |
-| `signup` | Yes | Log in normally (no duplicate). `201`. |
-| `login` | Yes | Log in. `201`. |
-| `login` | No | **`404`** — `"No account found for this phone number. Please sign up."` No account is created. |
-
-The frontend already knows which screen it's on (Sign Up vs Log In), so send the
-matching `flow`. On the Log In screen, catch the `404` and route the person to
-Sign Up.
-
-- **`flow` is optional for backward compatibility** — if omitted, it defaults to
-  `signup` (the old permissive behavior) so an in-flight frontend build doesn't
-  break. Always send it going forward.
-- **With a valid `Authorization: Bearer` token (attach phone):** `flow` is
-  ignored. The verified phone is attached to the *currently authenticated*
-  account — this is how a Google-first user ends up with ONE account holding both
-  their Google identity and their phone. Attaching a phone already linked to a
-  different account returns `400`.
-
 **Response `201`**
 ```json
 {
-  "accessToken": "eyJhbGci...",
-  "refreshToken": "eyJhbGci...",
-  "user": { "id": "uuid", "phone": "+251912345678", "role": "OWNER" }
+  "message": "Verification code sent by email.",
+  "userId": "uuid",
+  "channel": "email",                // or "sms" if no email was given
+  "sentTo": "d****@example.com",      // masked
+  "expiresInSeconds": 300,
+  "verifyPurpose": "EMAIL_VERIFY"     // or "PHONE_VERIFY"
 }
 ```
+`role` cannot be `ADMIN`/`SUPER_ADMIN` — those are ignored and fall back to
+`BUYER_RENTER`.
 
----
+### `POST /auth/verify-email` · `POST /auth/verify-phone-signup`
+Confirm the signup code and log in.
+**Body**
+```json
+{ "userId": "uuid", "code": "123456" }
+```
+**Response `201`** — `accessToken`, `refreshToken`, `user`.
+
+### `POST /auth/login`
+**Body**
+```json
+{ "identifier": "+251912345678", "password": "atleast8chars" }
+```
+`identifier` is a phone number OR an email address. **Response `201`** —
+`accessToken`, `refreshToken`, `user`. Errors: `401` for wrong credentials
+(uniform message), `403` if unverified or suspended.
+
+### `POST /auth/forgot-password`
+Sends a reset code — to **email if the account has a verified email, else SMS**.
+**Body**: `{ "identifier": "phone-or-email" }`.
+Always returns the same generic message, even for unknown accounts (no account
+enumeration).
+
+### `POST /auth/reset-password`
+**Body**
+```json
+{ "identifier": "phone-or-email", "code": "123456", "newPassword": "atleast8chars" }
+```
+On success the password is changed and **all existing sessions are revoked**.
+
+### `POST /auth/change-password` 🔒
+Logged-in user changing their own password.
+**Body**: `{ "currentPassword": "...", "newPassword": "atleast8chars" }`.
+
+### `POST /auth/phone/request` 🔒 · `POST /auth/phone/verify` 🔒
+Verify (or change) the logged-in user's phone. `request` body:
+`{ "phone": "+251912345678" }` → sends an SMS code. `verify` body:
+`{ "code": "123456" }` → saves the phone as verified. Used before posting a
+listing, and to change phone. A phone already linked elsewhere returns `400`.
+
+### `POST /auth/email/request` 🔒 · `POST /auth/email/verify` 🔒
+Change the logged-in user's email — the **new** address is verified before it's
+saved, so the old one stays active until confirmed. `request` body:
+`{ "email": "[email protected]" }`. `verify` body: `{ "code": "123456" }`.
 
 ### `POST /auth/google`
-"Continue with Google." The frontend runs the Google SDK, obtains a Google **ID
-token**, and posts it here. The backend verifies it server-side, then finds,
-creates, or links the Koreb account and returns **our own** session tokens (same
-shape as OTP verify) plus a `needsPhone` flag.
-
-**Body**
-```json
-{ "idToken": "<google-id-token-from-frontend-sdk>" }
-```
-**Response `201`**
-```json
-{
-  "accessToken": "eyJhbGci...",
-  "refreshToken": "eyJhbGci...",
-  "needsPhone": true,
-  "user": { "id": "uuid", "phone": null, "role": "BUYER_RENTER" }
-}
-```
-
-**How the account is resolved:**
-1. Known `googleId` → sign in.
-2. Else a **verified** Google email matching an existing account → link Google to
-   it and sign in. (Unverified emails never link — prevents account hijacking.)
-3. Else create a new account with `phone: null`, `role: BUYER_RENTER`.
-
-**`needsPhone`** is `true` whenever the account has no phone. When true, the
-frontend must run the phone+OTP attach step (call `POST /auth/otp/verify` **with
-the access token** from this response) before the user can post a listing.
-Browsing and favoriting work without a phone; **posting requires one.**
-
-> Phone + OTP remains the primary identity. Google is a convenience layer — it
-> gets a user in, but a phone still completes the account.
-
----
+"Continue with Google." Body: `{ "idToken": "<google-id-token>" }`. Returns
+`accessToken`, `refreshToken`, `needsPhone`, and `user`. See the mapping rules
+below the response — verified-email linking only, never unverified.
 
 ### `POST /auth/refresh`
-Exchange a valid refresh token for a new token pair.
-
-**Body**
-```json
-{ "refreshToken": "eyJhbGci..." }
-```
-**Response `201`** — same shape as verify (new `accessToken` + `refreshToken`).
-
----
+Body: `{ "refreshToken": "..." }`. Returns a fresh rotated token pair.
 
 ### `POST /auth/logout` 🔒
-Revokes the refresh token. Requires `Authorization: Bearer <accessToken>`.
-
-**Body**
-```json
-{ "refreshToken": "eyJhbGci..." }
-```
-**Response `201`**
-```json
-{ "message": "Logged out." }
-```
+Body: `{ "refreshToken": "..." }`. Revokes the refresh token.
 
 ---
 
+## Super Admin endpoints (all 🔒 + **SUPER_ADMIN only**)
+
+Managing admins is separated from the regular admin panel — a normal admin
+cannot reach these.
+
+| Method & path | Purpose |
+|---|---|
+| `GET /super-admin/admins` | List all admin + super-admin accounts |
+| `POST /super-admin/admins` | Create an admin. Body: `firstName, lastName, email, password, phone?` |
+| `DELETE /super-admin/admins/:id` | Remove admin access (demotes to normal user, keeps history) |
+
+The super admin account itself is seeded once from `SUPER_ADMIN_EMAIL` /
+`SUPER_ADMIN_PASSWORD` env vars — never created through the API.
 ## Users endpoints
 
 ### `GET /users/me` 🔒
@@ -196,7 +179,11 @@ Returns the current user's profile.
 {
   "id": "uuid",
   "phone": "+251912345678",
+  "phoneVerified": true,
   "email": null,
+  "emailVerified": false,
+  "firstName": "Dawit",
+  "lastName": "Alemu",
   "name": "Dawit Alemu",
   "profilePhotoUrl": null,
   "city": "Addis Ababa",
@@ -210,14 +197,15 @@ Returns the current user's profile.
   "createdAt": "2026-07-21T09:00:00.000Z"
 }
 ```
-- `phone` — the login number (private, only ever returned to the user themselves here). `null` for a Google-first user who hasn't attached one yet.
-- `email` — from Google sign-in, if any.
-- `hasGoogleLinked` — whether a Google account is linked.
-- `needsPhone` — `true` when `phone` is null; the user must attach a phone (via OTP) before posting a listing.
+- `phone` / `email` — login identifiers. `phoneVerified` / `emailVerified` show
+  which channel is confirmed (drive verification badges from these).
+- `firstName` / `lastName` — edit these separately on the profile screen; `name`
+  is the composed display version, kept in sync automatically.
+- `needsPhone` — `true` when `phone` is null; the user must verify a phone
+  before posting a listing.
 - `publicContactPhone` — the number the user chose to show publicly, or `null` if unset.
 - `effectiveContactPhone` — what actually appears on their listings right now:
-  their public number if set, otherwise their account phone. Useful for showing
-  the user "this is the number buyers currently see."
+  their public number if set, otherwise their account phone.
 
 ### `PATCH /users/me` 🔒
 Update profile. **Body** (all optional): `name`, `city`, `profilePhotoUrl`,
@@ -634,7 +622,9 @@ returns a `400`.
 
 | Mockup screen | Primary endpoints |
 |---|---|
-| **Sign Up** | `POST /auth/otp/request`, `POST /auth/otp/verify`, `POST /auth/google` (Continue with Google → may return `needsPhone: true`, then OTP-attach) |
+| **Sign Up** | `POST /auth/signup`, `POST /auth/verify-email` or `/auth/verify-phone-signup`, `POST /auth/google` |
+| **Log In** | `POST /auth/login` (phone or email + password), `POST /auth/forgot-password` + `/auth/reset-password` |
+| **Profile / Account** | `GET /users/me`, `PATCH /users/me` (name, city, picture, public contact), `POST /auth/change-password`, `POST /auth/email/request`+`/auth/email/verify`, `POST /auth/phone/request`+`/auth/phone/verify` |
 | **Home Feed** | `GET /listings` (+ query params for filters/sort/map) |
 | **Listing Detail** | `GET /listings/:id` (owner object carries `contactPhone` for Call/WhatsApp), `POST /favorites/:id`, `POST /listings/:id/report` |
 | **Post a Listing** | `POST /listings`, `POST /listings/:id/photos`, `POST /listings/:id/submit`, `POST /payments/listing/initiate` — now includes building name / unit number / floor number fields |

@@ -27,6 +27,7 @@ enum UserRole {
   OWNER
   AGENT
   ADMIN
+  SUPER_ADMIN
 }
 
 enum VerificationStatus {
@@ -96,21 +97,37 @@ enum ListingRejectionCode {
 
 model User {
   id                  String              @id @default(uuid())
-  // Phone is the primary identity and is required to POST a listing, but it's
-  // now nullable so a Google-first user can exist before attaching one. Still
-  // unique when present — Postgres treats multiple NULLs as distinct, so many
-  // phone-less Google users don't collide on the unique index.
+  // Phone is a login identifier and the anchor for Fayda ID verification. It's
+  // nullable so an email-first user can exist before verifying a phone (which
+  // happens before they can post a listing). Unique when present — Postgres
+  // treats multiple NULLs as distinct, so many phone-less users don't collide.
   phone               String?             @unique
+  phoneVerified       Boolean             @default(false)
+
+  // Email is the primary verification channel for most users (cheaper than SMS).
+  // Optional for regular users, REQUIRED for ADMIN / SUPER_ADMIN (enforced in
+  // the service layer, not the DB, so the column stays nullable for users).
   email               String?             @unique
+  emailVerified       Boolean             @default(false)
+
+  // bcrypt hash of the password. Nullable because a legacy/Google-only account
+  // could exist without one, but the new signup flow always sets it.
+  passwordHash        String?
+
   googleId            String?             @unique
+
+  firstName           String?
+  lastName            String?
+  // Kept as a computed convenience / legacy display name. Prefer firstName +
+  // lastName going forward.
   name                String?
+
   profilePhotoUrl     String?
   city                String?
 
   // Login phone (`phone` above) is used for auth and is never public.
   // `publicContactPhone` is what's shown on the user's listings for Call /
-  // WhatsApp. When null, public responses fall back to the account phone —
-  // see resolveContactPhone() / the owner shape in ListingsService.
+  // WhatsApp. When null, public responses fall back to the account phone.
   publicContactPhone  String?
   role                UserRole            @default(BUYER_RENTER)
   isSuspended         Boolean             @default(false)
@@ -134,6 +151,7 @@ model User {
   reportsFiled        Report[]            @relation("ReportsFiled")
   otpCodes            OtpCode[]
   refreshTokens       RefreshToken[]
+  verificationTokens  VerificationToken[]
 
   @@index([role])
   @@index([verificationStatus])
@@ -152,6 +170,33 @@ model OtpCode {
   user        User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   @@index([phone])
+}
+
+enum VerificationPurpose {
+  EMAIL_VERIFY
+  PHONE_VERIFY
+  PASSWORD_RESET
+}
+
+// Unified token for email verification, phone verification, and password reset.
+// A short numeric code is sent to the relevant channel (email or SMS); the hash
+// is stored here, never the raw code. Supersedes single-purpose OTP where email
+// is involved. `destination` records where it was sent (email address or phone)
+// so a "change email" flow can verify the NEW address before it's saved.
+model VerificationToken {
+  id          String              @id @default(uuid())
+  userId      String
+  purpose     VerificationPurpose
+  destination String              // email address or phone the code was sent to
+  codeHash    String
+  attempts    Int                 @default(0)
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  createdAt   DateTime            @default(now())
+
+  user        User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, purpose])
 }
 
 model RefreshToken {

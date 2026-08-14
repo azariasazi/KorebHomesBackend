@@ -14,12 +14,12 @@ import {
 } from './dto/admin.dto';
 
 /**
- * Every route here requires a valid access token AND the ADMIN role.
- * Guarding at the class level means no admin endpoint can be exposed by
- * accident — a new handler is protected the moment it's added.
+ * Every route here requires a valid access token AND an admin-level role.
+ * SUPER_ADMIN is included so the super admin can use everything a regular admin
+ * can; super-admin-only actions (managing admins) live in SuperAdminController.
  */
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(UserRole.ADMIN)
+@Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
 @Controller('admin')
 export class AdminController {
   constructor(private adminService: AdminService) {}
@@ -53,13 +53,17 @@ export class AdminController {
   }
 
   @Post('users/:id/suspend')
-  suspendUser(@Param('id') id: string, @Body() dto: SuspendUserDto) {
-    return this.adminService.suspendUser(id, dto.reason);
+  suspendUser(
+    @Param('id') id: string,
+    @Body() dto: SuspendUserDto,
+    @CurrentUser('role') actorRole: UserRole,
+  ) {
+    return this.adminService.suspendUser(actorRole, id, dto.reason);
   }
 
   @Post('users/:id/unsuspend')
-  unsuspendUser(@Param('id') id: string) {
-    return this.adminService.unsuspendUser(id);
+  unsuspendUser(@Param('id') id: string, @CurrentUser('role') actorRole: UserRole) {
+    return this.adminService.unsuspendUser(actorRole, id);
   }
 
   // ---- Agent verification ----

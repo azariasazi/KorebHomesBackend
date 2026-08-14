@@ -9,11 +9,15 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
-import { randomInt } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { SMS_PROVIDER, SmsProvider } from '../common/interfaces/sms-provider.interface';
-import { UserRole } from '@prisma/client';
-import { AuthFlow } from './dto/verify-otp.dto';
+import { UserRole, VerificationPurpose } from '@prisma/client';
+import { VerificationService } from './verification.service';
+import { SignupDto } from './dto/signup.dto';
+
+// Roles a user is allowed to self-assign at signup. ADMIN / SUPER_ADMIN are
+// created only by a super admin, never through public signup.
+const SELF_ASSIGNABLE_ROLES: UserRole[] = [UserRole.BUYER_RENTER, UserRole.OWNER, UserRole.AGENT];
 
 @Injectable()
 export class AuthService {
@@ -21,144 +25,291 @@ export class AuthService {
     private prisma: PrismaService,
     private jwt: JwtService,
     private config: ConfigService,
+    private verification: VerificationService,
     @Inject(SMS_PROVIDER) private smsProvider: SmsProvider,
   ) {}
 
   // ---------------------------------------------------------------------
-  // OTP request
+  // Signup — creates the account, then sends a verification code by EMAIL if
+  // one was given (cheap), otherwise by SMS (fallback). The account exists
+  // immediately but is unverified until the code is confirmed.
   // ---------------------------------------------------------------------
-  async requestOtp(phone: string) {
-    const resendCooldown = Number(this.config.get('OTP_RESEND_COOLDOWN_SECONDS') ?? 60);
-    const recent = await this.prisma.otpCode.findFirst({
-      where: { phone },
-      orderBy: { createdAt: 'desc' },
-    });
-    if (recent && Date.now() - recent.createdAt.getTime() < resendCooldown * 1000) {
-      const waitSeconds = Math.ceil(
-        (resendCooldown * 1000 - (Date.now() - recent.createdAt.getTime())) / 1000,
-      );
-      throw new BadRequestException(`Please wait ${waitSeconds}s before requesting another code.`);
+  async signup(dto: SignupDto) {
+    const role = dto.role && SELF_ASSIGNABLE_ROLES.includes(dto.role) ? dto.role : UserRole.BUYER_RENTER;
+
+    // Uniqueness checks up front for clear errors (DB unique also enforces this).
+    const existingPhone = await this.prisma.user.findUnique({ where: { phone: dto.phone } });
+    if (existingPhone) {
+      throw new BadRequestException('An account with this phone number already exists. Please log in.');
+    }
+    if (dto.email) {
+      const existingEmail = await this.prisma.user.findUnique({ where: { email: dto.email } });
+      if (existingEmail) {
+        throw new BadRequestException('An account with this email already exists. Please log in.');
+      }
     }
 
-    const length = Number(this.config.get('OTP_LENGTH') ?? 6);
-    const code = this.generateNumericCode(length);
-    const codeHash = await bcrypt.hash(code, 10);
-    const ttlSeconds = Number(this.config.get('OTP_TTL_SECONDS') ?? 300);
+    const passwordHash = await bcrypt.hash(dto.password, 10);
 
-    const existingUser = await this.prisma.user.findUnique({ where: { phone } });
-
-    await this.prisma.otpCode.create({
+    const user = await this.prisma.user.create({
       data: {
-        phone,
-        userId: existingUser?.id,
-        codeHash,
-        expiresAt: new Date(Date.now() + ttlSeconds * 1000),
+        firstName: dto.firstName,
+        lastName: dto.lastName,
+        name: `${dto.firstName} ${dto.lastName}`.trim(),
+        phone: dto.phone,
+        email: dto.email ?? null,
+        passwordHash,
+        role,
       },
     });
 
-    await this.smsProvider.send(phone, `Your Koreb Homes verification code is ${code}. It expires in ${Math.round(ttlSeconds / 60)} minutes.`);
+    // Route the verification: email if present (free), else SMS.
+    const channel: 'email' | 'sms' = dto.email ? 'email' : 'sms';
+    const destination = dto.email ?? dto.phone;
+    const purpose = dto.email ? VerificationPurpose.EMAIL_VERIFY : VerificationPurpose.PHONE_VERIFY;
 
-    return { message: 'Verification code sent.', expiresInSeconds: ttlSeconds };
+    const { expiresInSeconds } = await this.verification.issueAndSend({
+      userId: user.id,
+      purpose,
+      channel,
+      destination,
+    });
+
+    return {
+      message: `Verification code sent by ${channel === 'email' ? 'email' : 'SMS'}.`,
+      userId: user.id,
+      channel,
+      // Where the code went, lightly masked, so the frontend can say
+      // "we sent a code to d***@example.com" without echoing the full value.
+      sentTo: this.maskDestination(destination, channel),
+      expiresInSeconds,
+      verifyPurpose: purpose,
+    };
   }
 
   // ---------------------------------------------------------------------
-  // OTP verification -> issues tokens, creates user on first verification
+  // Verify the signup code (email or phone). Marks the account verified and
+  // issues session tokens so the user is logged in immediately after.
   // ---------------------------------------------------------------------
-  async verifyOtp(
-    phone: string,
-    code: string,
-    role?: UserRole,
-    name?: string,
-    authenticatedUserId?: string,
-    flow: AuthFlow = AuthFlow.SIGNUP,
-  ) {
-    const maxAttempts = Number(this.config.get('OTP_MAX_ATTEMPTS') ?? 5);
+  async verifySignup(userId: string, purpose: VerificationPurpose, code: string) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundException('Account not found.');
 
-    const otpRecord = await this.prisma.otpCode.findFirst({
-      where: { phone, consumedAt: null },
-      orderBy: { createdAt: 'desc' },
-    });
+    await this.verification.verify(userId, purpose, code);
 
-    if (!otpRecord) {
-      throw new BadRequestException('No active verification code found. Please request a new one.');
-    }
-    if (otpRecord.expiresAt.getTime() < Date.now()) {
-      throw new BadRequestException('Verification code has expired. Please request a new one.');
-    }
-    if (otpRecord.attempts >= maxAttempts) {
-      throw new BadRequestException('Too many incorrect attempts. Please request a new code.');
+    const data: Record<string, unknown> = {};
+    if (purpose === VerificationPurpose.EMAIL_VERIFY) data.emailVerified = true;
+    if (purpose === VerificationPurpose.PHONE_VERIFY) data.phoneVerified = true;
+
+    const updated = await this.prisma.user.update({ where: { id: userId }, data });
+
+    if (updated.isSuspended) {
+      throw new ForbiddenException('This account has been suspended. Please contact support.');
     }
 
-    const isValid = await bcrypt.compare(code, otpRecord.codeHash);
-    if (!isValid) {
-      await this.prisma.otpCode.update({
-        where: { id: otpRecord.id },
-        data: { attempts: { increment: 1 } },
-      });
-      throw new BadRequestException('Incorrect verification code.');
-    }
+    return this.issueTokens(updated.id, updated.phone, updated.role);
+  }
 
-    await this.prisma.otpCode.update({
-      where: { id: otpRecord.id },
-      data: { consumedAt: new Date() },
-    });
+  // ---------------------------------------------------------------------
+  // Login — identifier is a phone OR email, plus password.
+  // ---------------------------------------------------------------------
+  async login(identifier: string, password: string) {
+    const isEmail = identifier.includes('@');
+    const user = await this.prisma.user.findUnique(
+      isEmail ? { where: { email: identifier } } : { where: { phone: identifier } },
+    );
 
-    let user;
+    // Uniform error whether the account is missing or the password is wrong, so
+    // an attacker can't probe which phones/emails have accounts.
+    const invalid = () => new UnauthorizedException('Incorrect phone/email or password.');
 
-    if (authenticatedUserId) {
-      // "Attach phone" path: a Google-first (or any logged-in) user is adding a
-      // phone to their EXISTING account. This is what keeps a Google user to a
-      // single account with both googleId and phone, rather than spawning a
-      // second phone-only account.
-      const authedUser = await this.prisma.user.findUnique({ where: { id: authenticatedUserId } });
-      if (!authedUser) {
-        throw new UnauthorizedException('Your session is no longer valid. Please sign in again.');
-      }
+    if (!user || !user.passwordHash) throw invalid();
 
-      // Guard against stealing a phone already tied to a different account.
-      const phoneOwner = await this.prisma.user.findUnique({ where: { phone } });
-      if (phoneOwner && phoneOwner.id !== authedUser.id) {
-        throw new BadRequestException(
-          'This phone number is already linked to another account.',
-        );
-      }
-
-      user = await this.prisma.user.update({
-        where: { id: authedUser.id },
-        data: {
-          phone,
-          // Only fill name if they didn't already have one.
-          name: authedUser.name ?? name,
-        },
-      });
-    } else {
-      // Standard phone-first path: find or (for signup) create an account.
-      user = await this.prisma.user.findUnique({ where: { phone } });
-      if (!user) {
-        // Log In is strict: never create an account for an unknown number.
-        // The frontend catches this 404 and routes the person to Sign Up.
-        // (flow defaults to signup, so an older frontend that omits `flow`
-        // keeps today's permissive create-on-verify behavior.)
-        if (flow === AuthFlow.LOGIN) {
-          throw new NotFoundException(
-            'No account found for this phone number. Please sign up.',
-          );
-        }
-        user = await this.prisma.user.create({
-          data: {
-            phone,
-            name,
-            role: role ?? UserRole.BUYER_RENTER,
-          },
-        });
-      }
-    }
+    const ok = await bcrypt.compare(password, user.passwordHash);
+    if (!ok) throw invalid();
 
     if (user.isSuspended) {
       throw new ForbiddenException('This account has been suspended. Please contact support.');
     }
 
+    // Block login until the signup channel is verified.
+    const verified = user.emailVerified || user.phoneVerified;
+    if (!verified) {
+      throw new ForbiddenException('Please verify your account before logging in.');
+    }
+
     return this.issueTokens(user.id, user.phone, user.role);
+  }
+
+  // ---------------------------------------------------------------------
+  // Forgot password — send a reset code to email (preferred) or SMS.
+  // Always returns the same shape even if the account doesn't exist, so the
+  // endpoint can't be used to discover which phones/emails are registered.
+  // ---------------------------------------------------------------------
+  async forgotPassword(identifier: string) {
+    const isEmail = identifier.includes('@');
+    const user = await this.prisma.user.findUnique(
+      isEmail ? { where: { email: identifier } } : { where: { phone: identifier } },
+    );
+
+    const genericReply = { message: 'If an account exists, a reset code has been sent.' };
+    if (!user) return genericReply;
+
+    // Cost rule: email if the account has a verified email, else SMS.
+    const useEmail = !!user.email && user.emailVerified;
+    const channel: 'email' | 'sms' = useEmail ? 'email' : 'sms';
+    const destination = useEmail ? (user.email as string) : user.phone;
+    if (!destination) return genericReply; // nothing to send to
+
+    await this.verification.issueAndSend({
+      userId: user.id,
+      purpose: VerificationPurpose.PASSWORD_RESET,
+      channel,
+      destination,
+    });
+
+    return genericReply;
+  }
+
+  async resetPassword(identifier: string, code: string, newPassword: string) {
+    const isEmail = identifier.includes('@');
+    const user = await this.prisma.user.findUnique(
+      isEmail ? { where: { email: identifier } } : { where: { phone: identifier } },
+    );
+    if (!user) throw new BadRequestException('Invalid reset request.');
+
+    await this.verification.verify(user.id, VerificationPurpose.PASSWORD_RESET, code);
+
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: { passwordHash: await bcrypt.hash(newPassword, 10) },
+    });
+
+    // Revoke all sessions after a password reset, forcing re-login everywhere.
+    await this.prisma.refreshToken.updateMany({
+      where: { userId: user.id, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+
+    return { message: 'Password updated. Please log in with your new password.' };
+  }
+
+  // Logged-in user changing their password (must know the current one).
+  async changePassword(userId: string, currentPassword: string, newPassword: string) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user || !user.passwordHash) throw new NotFoundException('Account not found.');
+
+    const ok = await bcrypt.compare(currentPassword, user.passwordHash);
+    if (!ok) throw new BadRequestException('Your current password is incorrect.');
+
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: { passwordHash: await bcrypt.hash(newPassword, 10) },
+    });
+
+    return { message: 'Password changed.' };
+  }
+
+  // ---------------------------------------------------------------------
+  // Phone verification for an already-logged-in user. Two uses:
+  //   - an email-first user verifying their phone before posting a listing
+  //   - a user changing their phone (verify the NEW number before saving)
+  // ---------------------------------------------------------------------
+  async requestPhoneVerification(userId: string, newPhone: string) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundException('Account not found.');
+
+    // Block taking a phone already tied to someone else.
+    const owner = await this.prisma.user.findUnique({ where: { phone: newPhone } });
+    if (owner && owner.id !== userId) {
+      throw new BadRequestException('This phone number is already linked to another account.');
+    }
+
+    const { expiresInSeconds } = await this.verification.issueAndSend({
+      userId,
+      purpose: VerificationPurpose.PHONE_VERIFY,
+      channel: 'sms',
+      destination: newPhone,
+    });
+
+    return { message: 'Verification code sent by SMS.', expiresInSeconds };
+  }
+
+  async confirmPhoneVerification(userId: string, code: string) {
+    const { destination } = await this.verification.verify(
+      userId,
+      VerificationPurpose.PHONE_VERIFY,
+      code,
+    );
+
+    // Re-check the number is still free at confirm time (guards a race where two
+    // users verify the same number concurrently).
+    const owner = await this.prisma.user.findUnique({ where: { phone: destination } });
+    if (owner && owner.id !== userId) {
+      throw new BadRequestException('This phone number is already linked to another account.');
+    }
+
+    const updated = await this.prisma.user.update({
+      where: { id: userId },
+      data: { phone: destination, phoneVerified: true },
+    });
+
+    return { message: 'Phone verified.', phone: updated.phone };
+  }
+
+  // ---------------------------------------------------------------------
+  // Email change for a logged-in user — verify the NEW address before saving,
+  // so a typo can't lock someone out and the old email stays active until the
+  // new one is confirmed.
+  // ---------------------------------------------------------------------
+  async requestEmailChange(userId: string, newEmail: string) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundException('Account not found.');
+
+    const owner = await this.prisma.user.findUnique({ where: { email: newEmail } });
+    if (owner && owner.id !== userId) {
+      throw new BadRequestException('This email is already linked to another account.');
+    }
+
+    const { expiresInSeconds } = await this.verification.issueAndSend({
+      userId,
+      purpose: VerificationPurpose.EMAIL_VERIFY,
+      channel: 'email',
+      destination: newEmail,
+    });
+
+    return { message: 'Verification code sent to the new email.', expiresInSeconds };
+  }
+
+  async confirmEmailChange(userId: string, code: string) {
+    const { destination } = await this.verification.verify(
+      userId,
+      VerificationPurpose.EMAIL_VERIFY,
+      code,
+    );
+
+    const owner = await this.prisma.user.findUnique({ where: { email: destination } });
+    if (owner && owner.id !== userId) {
+      throw new BadRequestException('This email is already linked to another account.');
+    }
+
+    const updated = await this.prisma.user.update({
+      where: { id: userId },
+      data: { email: destination, emailVerified: true },
+    });
+
+    return { message: 'Email updated.', email: updated.email };
+  }
+
+  private maskDestination(destination: string, channel: 'email' | 'sms'): string {
+    if (channel === 'email') {
+      const [local, domain] = destination.split('@');
+      if (!domain) return destination;
+      const shown = local.slice(0, 1);
+      return `${shown}${'*'.repeat(Math.max(1, local.length - 1))}@${domain}`;
+    }
+    // phone: show last 2 digits
+    return `${'*'.repeat(Math.max(0, destination.length - 2))}${destination.slice(-2)}`;
   }
 
   // ---------------------------------------------------------------------
@@ -314,12 +465,6 @@ export class AuthService {
       refreshToken,
       user: { id: userId, phone, role },
     };
-  }
-
-  private generateNumericCode(length: number): string {
-    const min = Math.pow(10, length - 1);
-    const max = Math.pow(10, length) - 1;
-    return String(randomInt(min, max + 1));
   }
 
   private parseDaysFromDuration(duration: string): number {

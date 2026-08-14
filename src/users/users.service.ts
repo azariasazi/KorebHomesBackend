@@ -23,6 +23,14 @@ export class UsersService {
       data.publicContactPhone = null;
     }
 
+    // Keep the composed `name` in sync when either name part changes.
+    if (dto.firstName !== undefined || dto.lastName !== undefined) {
+      const current = await this.prisma.user.findUnique({ where: { id: userId } });
+      const first = dto.firstName ?? current?.firstName ?? '';
+      const last = dto.lastName ?? current?.lastName ?? '';
+      data.name = `${first} ${last}`.trim();
+    }
+
     const user = await this.prisma.user.update({
       where: { id: userId },
       data,
@@ -70,8 +78,12 @@ export class UsersService {
   private toPublicProfile(user: {
     id: string;
     phone: string | null;
+    phoneVerified: boolean;
     email: string | null;
+    emailVerified: boolean;
     googleId: string | null;
+    firstName: string | null;
+    lastName: string | null;
     name: string | null;
     profilePhotoUrl: string | null;
     city: string | null;
@@ -84,7 +96,11 @@ export class UsersService {
     return {
       id: user.id,
       phone: user.phone,
+      phoneVerified: user.phoneVerified,
       email: user.email,
+      emailVerified: user.emailVerified,
+      firstName: user.firstName,
+      lastName: user.lastName,
       name: user.name,
       profilePhotoUrl: user.profilePhotoUrl,
       city: user.city,
@@ -97,8 +113,8 @@ export class UsersService {
       effectiveContactPhone: user.publicContactPhone ?? user.phone,
       // Account-state flags for the frontend:
       hasGoogleLinked: user.googleId !== null,
-      // True when the account has no phone yet — the frontend must run the
-      // phone+OTP attach step before this user can post a listing.
+      // True when the account has no phone yet — the frontend must verify a
+      // phone before this user can post a listing.
       needsPhone: user.phone === null,
       createdAt: user.createdAt,
     };

@@ -1,10 +1,21 @@
 import { IsOptional, IsPhoneNumber, IsString, MaxLength, ValidateIf } from 'class-validator';
 
+/**
+ * The INSTANT tier of profile editing — fields a user can change freely with no
+ * re-verification. Email and phone are deliberately NOT here: those are login
+ * identifiers and are changed through the verified flows in AuthController
+ * (/auth/phone/request+verify, /auth/email/request+verify).
+ */
 export class UpdateProfileDto {
   @IsOptional()
   @IsString()
-  @MaxLength(100)
-  name?: string;
+  @MaxLength(60)
+  firstName?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(60)
+  lastName?: string;
 
   @IsOptional()
   @IsString()

@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import {
   ListingRejectionCode,
   ListingStatus,
@@ -120,21 +120,31 @@ export class AdminService {
     });
   }
 
-  async suspendUser(userId: string, reason: string) {
+  async suspendUser(actorRole: UserRole, userId: string, reason: string) {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new NotFoundException('User not found.');
-    if (user.role === UserRole.ADMIN) {
-      throw new BadRequestException('Admin accounts cannot be suspended here.');
+
+    // A SUPER_ADMIN can never be suspended through this endpoint.
+    if (user.role === UserRole.SUPER_ADMIN) {
+      throw new ForbiddenException('The super admin account cannot be suspended.');
     }
+    // Only a SUPER_ADMIN may suspend an ADMIN. Regular admins can't touch admins.
+    if (user.role === UserRole.ADMIN && actorRole !== UserRole.SUPER_ADMIN) {
+      throw new ForbiddenException('Only the super admin can suspend an admin account.');
+    }
+
     return this.prisma.user.update({
       where: { id: userId },
       data: { isSuspended: true, suspendedReason: reason, suspendedAt: new Date() },
     });
   }
 
-  async unsuspendUser(userId: string) {
+  async unsuspendUser(actorRole: UserRole, userId: string) {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new NotFoundException('User not found.');
+    if (user.role === UserRole.ADMIN && actorRole !== UserRole.SUPER_ADMIN) {
+      throw new ForbiddenException('Only the super admin can manage an admin account.');
+    }
     return this.prisma.user.update({
       where: { id: userId },
       data: { isSuspended: false, suspendedReason: null, suspendedAt: null },

@@ -91,6 +91,39 @@ row or a typo fails safe (free) rather than accidentally charging people.
 
 ---
 
+## Applying Change Request 07 (password auth, profile editing, super admin)
+
+The biggest change so far — moves auth from SMS-OTP to **passwords**, with email
+as the primary (cheap) verification channel and SMS only as fallback. Adds
+two-tier profile editing, a super admin role, and wipes the old test accounts.
+
+```bash
+# 1. Migrate (adds password, names, email/phone verified flags, SUPER_ADMIN,
+#    the VerificationToken table)
+npx prisma migrate dev --name cr07_password_auth
+
+# 2. Seed — creates your super admin from env vars (set these first!)
+SUPER_ADMIN_EMAIL=you@korebhomes.com SUPER_ADMIN_PASSWORD=your-strong-password npm run prisma:seed
+
+# 3. Verify
+npm test    # 53 tests
+```
+
+**Email sending:** development logs codes to the server console
+(`ConsoleEmailProvider`). When your hosting SMTP settings are in `.env`
+(`SMTP_HOST/PORT/USER/PASS`, `EMAIL_FROM`), switch the binding in
+`auth.module.ts` to `SmtpEmailProvider` — one line, nothing else changes.
+
+**Your super admin login:** after seeding, log in at `POST /auth/login` with the
+`SUPER_ADMIN_EMAIL` / `SUPER_ADMIN_PASSWORD` you set. From there, create other
+admins via `POST /super-admin/admins`.
+
+**Existing accounts are wiped** — the migration resets the user table and the
+seed creates no demo users, so everyone starts fresh under the new model. This
+was agreed as safe because staging held only test data.
+
+---
+
 ## Applying Change Request 06 (signup vs login flow)
 
 **No migration** — code only. `POST /auth/otp/verify` now takes a `flow` field
