@@ -115,9 +115,9 @@ export class AuthService {
   // ---------------------------------------------------------------------
   async login(identifier: string, password: string) {
     const isEmail = identifier.includes('@');
-    const user = await this.prisma.user.findUnique(
-      isEmail ? { where: { email: identifier } } : { where: { phone: identifier } },
-    );
+    const user = isEmail ? await this.prisma.user.findUnique(
+      { where: { email: identifier } }) : await this.prisma.user.findUnique(
+        { where: { phone: identifier } });
 
     // Uniform error whether the account is missing or the password is wrong, so
     // an attacker can't probe which phones/emails have accounts.
@@ -148,9 +148,9 @@ export class AuthService {
   // ---------------------------------------------------------------------
   async forgotPassword(identifier: string) {
     const isEmail = identifier.includes('@');
-    const user = await this.prisma.user.findUnique(
-      isEmail ? { where: { email: identifier } } : { where: { phone: identifier } },
-    );
+    const user = isEmail ? await this.prisma.user.findUnique(
+      { where: { email: identifier } }) : await this.prisma.user.findUnique(
+        { where: { phone: identifier } });
 
     const genericReply = { message: 'If an account exists, a reset code has been sent.' };
     if (!user) return genericReply;
@@ -173,9 +173,8 @@ export class AuthService {
 
   async resetPassword(identifier: string, code: string, newPassword: string) {
     const isEmail = identifier.includes('@');
-    const user = await this.prisma.user.findUnique(
-      isEmail ? { where: { email: identifier } } : { where: { phone: identifier } },
-    );
+    const user = isEmail ? await this.prisma.user.findUnique(
+      { where: { email: identifier } }) : await this.prisma.user.findUnique({ where: { phone: identifier } });
     if (!user) throw new BadRequestException('Invalid reset request.');
 
     await this.verification.verify(user.id, VerificationPurpose.PASSWORD_RESET, code);
