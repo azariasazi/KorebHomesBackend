@@ -1,1 +1,2 @@
--- AlterEnum ALTER TYPE "UserRole" ADD VALUE 'SUPER_ADMIN';
+-- AlterEnum
+ALTER TYPE "UserRole" ADD VALUE 'SUPER_ADMIN';
