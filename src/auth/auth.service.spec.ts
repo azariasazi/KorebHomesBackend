@@ -1,5 +1,6 @@
 import { AuthService } from './auth.service';
 import { UserRole, VerificationPurpose } from '@prisma/client';
+import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 
 /**
  * Tests for the password-based auth model (CR-07):
@@ -16,8 +17,8 @@ const smsMock = { send: jest.fn() };
 
 // A stand-in VerificationService whose issue/verify we can assert on.
 const makeVerification = () => ({
-  issueAndSend: jest.fn().mockResolvedValue({ expiresInSeconds: 300 }),
-  verify: jest.fn().mockResolvedValue({ destination: '[email protected]' }),
+  issueAndSend: jest.fn<() => Promise<{ expiresInSeconds: number }>>().mockResolvedValue({ expiresInSeconds: 300 }),
+  verify: jest.fn<() => Promise<{ destination: string }>>().mockResolvedValue({ destination: '[email protected]' }),
 });
 
 describe('AuthService — signup', () => {
@@ -29,14 +30,14 @@ describe('AuthService — signup', () => {
     verification = makeVerification();
     prismaMock = {
       user: {
-        findUnique: jest.fn().mockResolvedValue(null), // nothing exists yet
+        findUnique: jest.fn<any>().mockResolvedValue(null), // nothing exists yet
         create: jest.fn(async ({ data }: any) => ({ id: 'u1', isSuspended: false, ...data })),
       },
     };
     jest.spyOn(require('bcrypt'), 'hash').mockResolvedValue('hashed' as any);
     service = new AuthService(prismaMock, jwtMock as any, configMock as any, verification as any, smsMock as any);
   });
-  afterEach(() => jest.restoreAllMocks());
+  afterEach(async () => jest.restoreAllMocks());
 
   const base = { firstName: 'Dawit', lastName: 'Alemu', phone: '+251912345678', password: 'secret12' };
 
@@ -57,7 +58,7 @@ describe('AuthService — signup', () => {
   });
 
   it('rejects a duplicate phone', async () => {
-    prismaMock.user.findUnique = jest.fn().mockResolvedValue({ id: 'existing' });
+    prismaMock.user.findUnique = jest.fn<any>().mockResolvedValue({ id: 'existing' } as any);
     await expect(service.signup({ ...base } as any)).rejects.toThrow(/already exists/i);
   });
 
@@ -89,13 +90,13 @@ describe('AuthService — login', () => {
 
   const build = (user: any) => {
     prismaMock = {
-      user: { findUnique: jest.fn().mockResolvedValue(user) },
-      refreshToken: { create: jest.fn().mockResolvedValue({}) },
+      user: { findUnique: jest.fn<any>().mockResolvedValue(user) },
+      refreshToken: { create: jest.fn<any>().mockResolvedValue({}) },
     };
     return new AuthService(prismaMock, jwtMock as any, configMock as any, makeVerification() as any, smsMock as any);
   };
 
-  afterEach(() => jest.restoreAllMocks());
+  afterEach(async () => jest.restoreAllMocks());
 
   it('logs in with a correct password', async () => {
     service = build(buildUser());
@@ -137,17 +138,17 @@ describe('AuthService — password reset', () => {
     verification = makeVerification();
     prismaMock = {
       user: {
-        findUnique: jest.fn().mockResolvedValue({
+        findUnique: jest.fn<any>().mockResolvedValue({
           id: 'u1', email: '[email protected]', emailVerified: true, phone: '+251912345678',
         }),
-        update: jest.fn().mockResolvedValue({}),
+        update: jest.fn<any>().mockResolvedValue({}),
       },
-      refreshToken: { updateMany: jest.fn().mockResolvedValue({}) },
+      refreshToken: { updateMany: jest.fn<any>().mockResolvedValue({}) },
     };
     jest.spyOn(require('bcrypt'), 'hash').mockResolvedValue('hashed' as any);
     service = new AuthService(prismaMock, jwtMock as any, configMock as any, verification as any, smsMock as any);
   });
-  afterEach(() => jest.restoreAllMocks());
+  afterEach(async () => jest.restoreAllMocks());
 
   it('forgot-password sends the code by EMAIL when the email is verified', async () => {
     await service.forgotPassword('[email protected]');
@@ -157,7 +158,7 @@ describe('AuthService — password reset', () => {
   });
 
   it('forgot-password returns a generic reply for an unknown account (no enumeration)', async () => {
-    prismaMock.user.findUnique = jest.fn().mockResolvedValue(null);
+    prismaMock.user.findUnique = jest.fn<any>().mockResolvedValue(null);
     const res: any = await service.forgotPassword('[email protected]');
     expect(res.message).toMatch(/if an account exists/i);
     expect(verification.issueAndSend).not.toHaveBeenCalled();
@@ -194,7 +195,7 @@ describe('AuthService — Google sign-in mapping (still holds under CR-07)', () 
         }),
         update: jest.fn(async ({ data }: any) => ({ id: 'linked', isSuspended: false, ...data })),
       },
-      refreshToken: { create: jest.fn().mockResolvedValue({}) },
+      refreshToken: { create: jest.fn<any>().mockResolvedValue({}) },
     };
     service = new AuthService(prismaMock, jwtMock as any, configMock as any, makeVerification() as any, smsMock as any);
   });
