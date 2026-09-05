@@ -3,6 +3,6 @@
   "build": { "builder": "NIXPACKS", 
              "buildCommand": "npm install --include=dev && npx prisma generate && npm run build" 
            }, 
-  "deploy": {  "startCommand": "npx prisma migrate deploy && npm run start:prod", 
+  "deploy": {  "startCommand": "npx prisma migrate deploy && npm run prisma:seed && npm run start:prod", 
               "restartPolicyType": "ON_FAILURE" } 
 }
